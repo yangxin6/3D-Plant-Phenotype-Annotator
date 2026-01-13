@@ -1,7 +1,6 @@
 import numpy as np
 from dataclasses import dataclass
 from typing import List, Optional
-
 from core.graph_path import KNNGraphPath
 
 
@@ -16,7 +15,7 @@ class CenterlineResult:
 class CenterlineExtractor:
     def __init__(self, k: int = 25, smooth_win: int = 9):
         self.graph = KNNGraphPath(k=k)
-        self.smooth_win = max(3, int(smooth_win) | 1)  # odd
+        self.smooth_win = max(3, int(smooth_win) | 1)
 
     @staticmethod
     def smooth_polyline(P: np.ndarray, win: int) -> np.ndarray:
@@ -74,7 +73,7 @@ class CenterlineExtractor:
         for a, b in zip(chain[:-1], chain[1:]):
             pidx = self.graph.shortest_path_indices(W, a, b)
             if path_all:
-                pidx = pidx[1:]  # avoid duplicate joint
+                pidx = pidx[1:]
             path_all.extend(pidx.tolist())
 
         path_all = np.array(path_all, dtype=int)
@@ -82,9 +81,4 @@ class CenterlineExtractor:
         smooth = self.smooth_polyline(raw, win=self.smooth_win)
         L = self.arclength(smooth)
 
-        return CenterlineResult(
-            raw_points=raw,
-            smooth_points=smooth,
-            length=L,
-            path_indices=path_all
-        )
+        return CenterlineResult(raw_points=raw, smooth_points=smooth, length=L, path_indices=path_all)

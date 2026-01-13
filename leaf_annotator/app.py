@@ -5,7 +5,7 @@ from ui.main_window import LeafAnnotatorWindow
 def main():
     app = QtWidgets.QApplication([])
     w = LeafAnnotatorWindow()
-    w.resize(1400, 800)
+    w.resize(1500, 850)
     w.show()
     app.exec_()
 

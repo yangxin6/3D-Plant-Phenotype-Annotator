@@ -1,7 +1,7 @@
-import numpy as np
 from scipy.spatial import cKDTree
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import dijkstra
+import numpy as np
 
 
 class KNNGraphPath:
@@ -12,14 +12,16 @@ class KNNGraphPath:
 
     def build_graph(self, points: np.ndarray) -> csr_matrix:
         tree = cKDTree(points)
-        dists, nbrs = tree.query(points, k=self.k + 1)  # include self
+        dists, nbrs = tree.query(points, k=self.k + 1)
         rows, cols, data = [], [], []
         n = len(points)
 
         for i in range(n):
-            for j, dist in zip(nbrs[i, 1:], dists[i, 1:]):  # skip self
-                rows.append(i); cols.append(int(j)); data.append(float(dist))
-                rows.append(int(j)); cols.append(i); data.append(float(dist))
+            for j, dist in zip(nbrs[i, 1:], dists[i, 1:]):
+                j = int(j)
+                w = float(dist)
+                rows.append(i); cols.append(j); data.append(w)
+                rows.append(j); cols.append(i); data.append(w)
 
         return csr_matrix((data, (rows, cols)), shape=(n, n))
 

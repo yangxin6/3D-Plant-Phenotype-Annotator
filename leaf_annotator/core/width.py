@@ -1,7 +1,6 @@
 import numpy as np
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
-
 from scipy.spatial import cKDTree
 from core.centerline import CenterlineExtractor
 
@@ -55,13 +54,13 @@ class WidthEstimator:
 
     def _robust_width_slice(self, slice_pts_3d: np.ndarray, p: np.ndarray, u: np.ndarray, v: np.ndarray):
         X = slice_pts_3d - p
-        x2 = np.stack([X @ u, X @ v], axis=1)  # (n,2)
+        x2 = np.stack([X @ u, X @ v], axis=1)
 
         mu = x2.mean(axis=0)
         Y = x2 - mu
         C = (Y.T @ Y) / max(1, len(Y) - 1)
         eigvals, eigvecs = np.linalg.eigh(C)
-        a = eigvecs[:, np.argmax(eigvals)]  # main axis in 2D
+        a = eigvecs[:, np.argmax(eigvals)]
 
         proj = x2 @ a
         lo = np.quantile(proj, self.qlo)
@@ -73,7 +72,6 @@ class WidthEstimator:
         return w, slice_pts_3d[idx_lo], slice_pts_3d[idx_hi]
 
     def compute(self, leaf_points: np.ndarray, centerline_points: np.ndarray) -> WidthResult:
-        # resample centerline
         C = CenterlineExtractor.resample_by_step(centerline_points, step=self.step)
         if len(C) < 3:
             return WidthResult(profile=[], max_item=None)
@@ -95,20 +93,13 @@ class WidthEstimator:
                 continue
             cand = leaf_points[idx]
 
-            d = np.abs((cand - p) @ tn)  # distance to plane
+            d = np.abs((cand - p) @ tn)
             slice_pts = cand[d < self.slab_half]
             if len(slice_pts) < self.min_slice_pts:
                 continue
 
             w, pL, pR = self._robust_width_slice(slice_pts, p, u, v)
-            item = WidthItem(
-                s_index=int(i),
-                p=p.copy(),
-                width=w,
-                pL=pL.copy(),
-                pR=pR.copy(),
-                slice_n=int(len(slice_pts))
-            )
+            item = WidthItem(s_index=int(i), p=p.copy(), width=w, pL=pL.copy(), pR=pR.copy(), slice_n=int(len(slice_pts)))
             profile.append(item)
             if max_item is None or item.width > max_item.width:
                 max_item = item
