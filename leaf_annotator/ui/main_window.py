@@ -6,7 +6,7 @@ import vtk
 from pyvistaqt import QtInteractor
 
 from PyQt5 import QtWidgets
-from PyQt5.QtWidgets import QFileDialog, QMessageBox
+from PyQt5.QtWidgets import QFileDialog, QMessageBox, QListWidgetItem
 
 from core.annotation import LeafAnnotationSession, AnnotationParams
 from core.schema import CloudSchema
@@ -39,35 +39,34 @@ def colors_from_labels(labels: np.ndarray) -> np.ndarray:
 
 class LeafAnnotatorWindow(QtWidgets.QMainWindow):
     """
-    ✅ 你要求的逻辑（保证）：
-    1) 开启叶基 -> 选点 -> 关闭：点保留（保存到 session.base_idx，始终渲染）
-    2) 开启叶尖 -> 选点 -> 关闭：叶基仍在，叶尖保留（session.tip_idx）
-    3) 开启控制点 -> 选多个 -> 关闭：叶基/叶尖仍在，控制点多个保留（session.ctrl_indices）
-
-    额外保证：
-    - 标注模式共用一个视图：不 plotter.clear()，不 reset_camera()（只增量更新 actors）
-    - 标注模式实例点云统一灰色
-    - base 红、tip 蓝、ctrl 绿，点选的点（保存/临时）都可见
-    - 切换 inst：若已标注，自动显示缓存中心线/宽线；并恢复保存的 base/tip/ctrl（由 session 负责）
-    - 稳定拾取：使用 VTK vtkPointPicker + Shift+左键（不依赖 PyVista 版本的 enable_point_picking）
+    - 左侧点列表：B1/T1/Ci/W1/W2，可删除并同步更新
+    - 叶宽：用户可手选 W1/W2 做最短路径；并且当叶长点齐了后，可自动/手动推荐 W1/W2
+    - 标注模式单视图增量更新：不 clear，不 reset_camera
+    - 拾取：VTK PointPicker + Shift+左键（只拾取实例点云）
     """
 
     MODE_NONE = "NONE"
     MODE_BASE = "PICK_BASE"
     MODE_TIP = "PICK_TIP"
     MODE_CTRL = "PICK_CTRL"
+    MODE_WIDTH = "PICK_WIDTH"
 
-    # actor names (增量更新用)
+    # actor names
     A_CLOUD_FULL = "cloud_full"
     A_CLOUD_INST = "cloud_inst"
 
     A_BASE_SAVED = "mark_base_saved"
     A_TIP_SAVED = "mark_tip_saved"
     A_CTRL_SAVED = "mark_ctrl_saved"
+    A_WIDTH_SAVED = "mark_width_saved"
 
     A_BASE_TEMP = "mark_base_temp"
     A_TIP_TEMP = "mark_tip_temp"
     A_CTRL_TEMP = "mark_ctrl_temp"
+    A_WIDTH_TEMP = "mark_width_temp"
+
+    A_LABELS_SAVED = "labels_saved"
+    A_LABELS_TEMP = "labels_temp"
 
     A_LINE_CENTER_CUR = "line_center_current"
     A_LINE_WIDTH_CUR = "line_width_current"
@@ -89,12 +88,16 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         self.temp_tip_idx = None
         self.temp_ctrl_indices = []
 
+        # 叶宽两点：临时（开启期间）
+        self.temp_w1_idx = None
+        self.temp_w2_idx = None
+
         # VTK picker
         self._vtk_picker = vtk.vtkPointPicker()
-        self._vtk_picker.SetTolerance(0.02)  # 可调：越大越容易拾取到点
+        self._vtk_picker.SetTolerance(0.02)
         self._pick_observer_id = None
 
-        # 记录当前实例点云 actor，便于 PickFromList（防止拾取到线/marker）
+        # 记录当前实例点云 actor（picker 只拾取它）
         self._actor_cloud_inst = None
 
         root = QtWidgets.QWidget()
@@ -130,14 +133,58 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         self.btn_toggle_base = QtWidgets.QPushButton("叶基选择：关闭")
         self.btn_toggle_tip = QtWidgets.QPushButton("叶尖选择：关闭")
         self.btn_toggle_ctrl = QtWidgets.QPushButton("控制点选择：关闭")
-        for b in [self.btn_toggle_base, self.btn_toggle_tip, self.btn_toggle_ctrl]:
+        self.btn_toggle_width = QtWidgets.QPushButton("叶宽点选择：关闭 (W1/W2)")
+        for b in [self.btn_toggle_base, self.btn_toggle_tip, self.btn_toggle_ctrl, self.btn_toggle_width]:
             b.setCheckable(True)
+
         panel.addWidget(self.btn_toggle_base)
         panel.addWidget(self.btn_toggle_tip)
         panel.addWidget(self.btn_toggle_ctrl)
+        panel.addWidget(self.btn_toggle_width)
+
+        # ✅ 新增：推荐叶宽按钮（强制重新推荐并展示）
+        self.btn_recommend_width = QtWidgets.QPushButton("推荐叶宽（最大叶宽）")
+        panel.addWidget(self.btn_recommend_width)
+
+        panel.addSpacing(8)
+
+        # ------- point lists + delete -------
+        panel.addWidget(QtWidgets.QLabel("点列表（选择编号后删除）"))
+
+        self.list_base = QtWidgets.QListWidget()
+        self.list_tip = QtWidgets.QListWidget()
+        self.list_ctrl = QtWidgets.QListWidget()
+        self.list_width = QtWidgets.QListWidget()
+
+        self.list_base.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.list_tip.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.list_ctrl.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.list_width.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+
+        panel.addWidget(QtWidgets.QLabel("叶基 (B1)"))
+        panel.addWidget(self.list_base)
+        self.btn_del_base = QtWidgets.QPushButton("删除选中的叶基")
+        panel.addWidget(self.btn_del_base)
+
+        panel.addWidget(QtWidgets.QLabel("叶尖 (T1)"))
+        panel.addWidget(self.list_tip)
+        self.btn_del_tip = QtWidgets.QPushButton("删除选中的叶尖")
+        panel.addWidget(self.btn_del_tip)
+
+        panel.addWidget(QtWidgets.QLabel("控制点 (C1..Cn)"))
+        panel.addWidget(self.list_ctrl)
+        self.btn_del_ctrl = QtWidgets.QPushButton("删除选中的控制点")
+        panel.addWidget(self.btn_del_ctrl)
+
+        panel.addWidget(QtWidgets.QLabel("叶宽点 (W1/W2)"))
+        panel.addWidget(self.list_width)
+        self.btn_del_width = QtWidgets.QPushButton("删除选中的叶宽点")
+        panel.addWidget(self.btn_del_width)
+
+        panel.addSpacing(6)
 
         self.btn_clear_ctrl = QtWidgets.QPushButton("清空控制点（已保存）")
-        self.btn_compute = QtWidgets.QPushButton("计算并保存（叶长+叶宽）")
+        self.btn_compute = QtWidgets.QPushButton("计算并保存（叶长 + 叶宽路径）")
         self.btn_export = QtWidgets.QPushButton("导出整株标注 JSON（所有已标注实例）")
         panel.addWidget(self.btn_clear_ctrl)
         panel.addWidget(self.btn_compute)
@@ -161,22 +208,29 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
 
         self.btn_start_anno.clicked.connect(self.on_start_annotation)
         self.btn_back_browse.clicked.connect(self.on_back_browse)
-
         self.combo_inst.currentIndexChanged.connect(self.on_inst_changed)
 
         self.btn_toggle_base.toggled.connect(self.on_toggle_base)
         self.btn_toggle_tip.toggled.connect(self.on_toggle_tip)
         self.btn_toggle_ctrl.toggled.connect(self.on_toggle_ctrl)
+        self.btn_toggle_width.toggled.connect(self.on_toggle_width)
+
+        self.btn_del_base.clicked.connect(self.on_delete_base)
+        self.btn_del_tip.clicked.connect(self.on_delete_tip)
+        self.btn_del_ctrl.clicked.connect(self.on_delete_ctrl)
+        self.btn_del_width.clicked.connect(self.on_delete_width)
+
+        self.btn_recommend_width.clicked.connect(self.on_recommend_width)  # ✅
 
         self.btn_clear_ctrl.clicked.connect(self.on_clear_ctrl)
         self.btn_compute.clicked.connect(self.on_compute)
         self.btn_export.clicked.connect(self.on_export_all)
 
-        # 安装一次：Shift+左键拾取（稳定，不依赖 pyvista picking）
         self._install_vtk_pick_observer()
 
         self._update_buttons()
-        self._update_status("提示：标注模式下用 Shift+左键 选点。")
+        self._update_status("提示：标注模式用 Shift+左键 选点。")
+        self._refresh_point_lists()
 
     # ----------------------------
     # status
@@ -207,8 +261,12 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
 
     def _update_buttons(self):
         in_anno = self.annotating
-        for b in [self.btn_toggle_base, self.btn_toggle_tip, self.btn_toggle_ctrl,
-                  self.btn_clear_ctrl, self.btn_compute]:
+        for b in [
+            self.btn_toggle_base, self.btn_toggle_tip, self.btn_toggle_ctrl, self.btn_toggle_width,
+            self.btn_recommend_width,  # ✅
+            self.btn_del_base, self.btn_del_tip, self.btn_del_ctrl, self.btn_del_width,
+            self.btn_clear_ctrl, self.btn_compute
+        ]:
             b.setEnabled(in_anno)
 
         self.btn_export.setEnabled(self.session.cloud is not None and self.session.get_annotations_count() > 0)
@@ -222,21 +280,17 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         if self._pick_observer_id is not None:
             return
 
-        iren = self.plotter.interactor  # vtkRenderWindowInteractor
+        iren = self.plotter.interactor
 
         def _on_left_press(obj, event):
-            # 仅标注模式 + 当前处于某个 pick 模式才拾取
             if (not self.annotating) or (self.pick_mode == self.MODE_NONE) or (self.session.ds is None):
                 return
-
-            # 只在 Shift 按下时拾取，避免影响平时旋转
             if iren.GetShiftKey() == 0:
                 return
 
             x, y = iren.GetEventPosition()
             renderer = self.plotter.renderer
 
-            # 只从实例点云 actor 拾取（避免拾取到线/marker）
             self._vtk_picker.PickFromListOn()
             self._vtk_picker.InitializePickList()
             if self._actor_cloud_inst is not None:
@@ -248,7 +302,6 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
             ok = self._vtk_picker.Pick(x, y, 0, renderer)
             if not ok:
                 return
-
             pid = self._vtk_picker.GetPointId()
             if pid < 0:
                 return
@@ -256,50 +309,60 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
             pick_pos = np.array(self._vtk_picker.GetPickPosition(), dtype=np.float64)
             self.on_picked_point(pick_pos)
 
-            # 阻止相机旋转（仅在Shift拾取时）
-            obj.AbortFlagOn()
+            # ✅ 修复：不同 VTK 对象/版本不一定有 AbortFlagOn()
+            try:
+                obj.AbortFlagOn()
+            except AttributeError:
+                try:
+                    obj.SetAbortFlag(1)
+                except Exception:
+                    pass
 
         self._pick_observer_id = iren.AddObserver("LeftButtonPressEvent", _on_left_press)
 
     # ----------------------------
-    # actor helpers (增量更新)
+    # actor helpers (incremental update)
     # ----------------------------
     def _remove_actor(self, name: str):
         try:
             self.plotter.remove_actor(name)
         except Exception:
-            # 某些版本 remove_actor 可能不支持 name，忽略即可
             pass
 
     def _add_points_actor(self, name: str, pts: np.ndarray, color, point_size: int):
-        """一次性添加点 actor（pts: Nx3）。"""
         self._remove_actor(name)
         if pts is None or len(pts) == 0:
             return None
         poly = pv.PolyData(pts)
-        actor = self.plotter.add_mesh(
-            poly,
-            name=name,
-            color=color,
-            render_points_as_spheres=True,
-            point_size=point_size
+        return self.plotter.add_mesh(
+            poly, name=name, color=color,
+            render_points_as_spheres=True, point_size=point_size
         )
-        return actor
 
     def _add_polyline_actor(self, name: str, pts: np.ndarray, color, line_width: int):
         self._remove_actor(name)
         if pts is None or len(pts) < 2:
             return None
-        actor = self.plotter.add_mesh(
+        return self.plotter.add_mesh(
             make_polyline_mesh(np.asarray(pts, dtype=np.float64)),
-            name=name,
-            color=color,
-            line_width=line_width
+            name=name, color=color, line_width=line_width
         )
-        return actor
+
+    def _add_labels_actor(self, name: str, pts: np.ndarray, labels: list):
+        self._remove_actor(name)
+        if pts is None or len(pts) == 0:
+            return None
+        return self.plotter.add_point_labels(
+            pts, labels,
+            name=name,
+            point_size=0,
+            font_size=14,
+            shape_opacity=0.25,
+            always_visible=True
+        )
 
     # ----------------------------
-    # build polydata for browsing
+    # browsing polydata
     # ----------------------------
     def _get_full_cloud_polydata(self) -> pv.PolyData:
         xyz = self.session.get_full_xyz()
@@ -317,25 +380,25 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         return poly
 
     # ----------------------------
-    # scene update (单视图增量更新)
+    # scene update
     # ----------------------------
     def _show_browse_scene(self):
-        """浏览模式：显示整株，隐藏标注层。"""
-        # cloud_full
         poly = self._get_full_cloud_polydata()
+
         self._remove_actor(self.A_CLOUD_INST)
         self._actor_cloud_inst = None
 
-        # 重新加 full cloud
         self._remove_actor(self.A_CLOUD_FULL)
-        self.plotter.add_points(poly, scalars="rgb", rgb=True,
-                                name=self.A_CLOUD_FULL,
-                                render_points_as_spheres=True, point_size=3)
+        self.plotter.add_points(
+            poly, scalars="rgb", rgb=True,
+            name=self.A_CLOUD_FULL,
+            render_points_as_spheres=True, point_size=3
+        )
 
-        # 移除所有标注层
         for nm in [
-            self.A_BASE_SAVED, self.A_TIP_SAVED, self.A_CTRL_SAVED,
-            self.A_BASE_TEMP, self.A_TIP_TEMP, self.A_CTRL_TEMP,
+            self.A_BASE_SAVED, self.A_TIP_SAVED, self.A_CTRL_SAVED, self.A_WIDTH_SAVED,
+            self.A_BASE_TEMP, self.A_TIP_TEMP, self.A_CTRL_TEMP, self.A_WIDTH_TEMP,
+            self.A_LABELS_SAVED, self.A_LABELS_TEMP,
             self.A_LINE_CENTER_CUR, self.A_LINE_WIDTH_CUR,
             self.A_LINE_CENTER_CACHED, self.A_LINE_WIDTH_CACHED
         ]:
@@ -344,92 +407,225 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         self.plotter.render()
 
     def _show_annotate_scene(self):
-        """标注模式：显示当前实例（灰），叠加 markers/lines。"""
         if self.session.ds is None:
             return
 
         ds = self.session.get_ds_points()
 
-        # 替换 cloud_inst
         self._remove_actor(self.A_CLOUD_FULL)
         self._remove_actor(self.A_CLOUD_INST)
-        poly = pv.PolyData(ds)
 
-        # add_mesh 返回 actor，保存以便 picker 只拾取它
+        poly = pv.PolyData(ds)
         self._actor_cloud_inst = self.plotter.add_mesh(
-            poly,
-            name=self.A_CLOUD_INST,
+            poly, name=self.A_CLOUD_INST,
             color=(0.7, 0.7, 0.7),
-            render_points_as_spheres=True,
-            point_size=5
+            render_points_as_spheres=True, point_size=5
         )
 
-        # markers: saved + temp
         self._update_markers_saved()
         self._update_markers_temp()
-
-        # lines
+        self._update_labels_saved()
+        self._update_labels_temp()
         self._update_lines()
 
         self.plotter.render()
 
+    # ----------------------------
+    # recommend width hook
+    # ----------------------------
+    def _maybe_recommend_width_and_refresh(self):
+        if not self.annotating:
+            return
+        if self.session.base_idx is None or self.session.tip_idx is None:
+            return
+        try:
+            changed = self.session.recommend_width_endpoints(overwrite=False)
+        except Exception:
+            changed = False
+
+        if changed:
+            self._update_markers_saved()
+            self._update_labels_saved()
+            self._refresh_point_lists()
+            self.plotter.render()
+
+    def on_recommend_width(self):
+        """
+        ✅ 新按钮：强制重新推荐叶宽点（overwrite=True），并展示：
+        - 橙色 W1/W2 点
+        - 绿色最短路径（如果可达）
+        """
+        if not self.annotating:
+            return
+
+        # 提交 temp，避免推荐时用到旧状态
+        if self.pick_mode != self.MODE_NONE:
+            self._exit_current_mode(commit=True)
+
+        if self.session.base_idx is None or self.session.tip_idx is None:
+            QMessageBox.information(self, "提示", "请先完成叶基(B1)和叶尖(T1)选择（可选控制点）。")
+            return
+
+        try:
+            ok = self.session.recommend_width_endpoints(overwrite=True)
+            if not ok:
+                QMessageBox.information(self, "提示", "未能找到有效的最大叶宽推荐（可调大 radius/slab_half 或检查点云密度）。")
+                # 仍刷新一下（有时推荐失败但已有旧点）
+                self._update_markers_saved()
+                self._update_labels_saved()
+                self._refresh_point_lists()
+                self.plotter.render()
+                return
+
+            # 为了“展示出叶宽的位置”，这里直接计算一次当前 width_path（不 commit）
+            self.session.compute()
+
+            self._update_markers_saved()
+            self._update_labels_saved()
+            self._update_lines()
+            self._refresh_point_lists()
+            self.plotter.render()
+
+            self._update_status("已推荐叶宽点：W1/W2 已更新（橙色点），并显示最短路径（绿色线）。")
+        except Exception as e:
+            QMessageBox.critical(self, "推荐失败", str(e))
+
+    # ----------------------------
+    # markers + labels
+    # ----------------------------
     def _update_markers_saved(self):
-        """保存点：始终显示（base红 tip蓝 ctrl绿）。"""
         if self.session.ds is None:
             return
         ds = self.session.get_ds_points()
 
-        # base saved (single)
         if self.session.base_idx is not None:
             p = ds[int(self.session.base_idx)][None, :]
             self._add_points_actor(self.A_BASE_SAVED, p, "red", 16)
         else:
             self._remove_actor(self.A_BASE_SAVED)
 
-        # tip saved (single)
         if self.session.tip_idx is not None:
             p = ds[int(self.session.tip_idx)][None, :]
             self._add_points_actor(self.A_TIP_SAVED, p, "blue", 16)
         else:
             self._remove_actor(self.A_TIP_SAVED)
 
-        # ctrl saved (many) — 聚合成一个 actor
         if len(self.session.ctrl_indices) > 0:
             pts = ds[np.array(self.session.ctrl_indices, dtype=int)]
             self._add_points_actor(self.A_CTRL_SAVED, pts, "green", 14)
         else:
             self._remove_actor(self.A_CTRL_SAVED)
 
+        w_pts = []
+        if getattr(self.session, "width_w1_idx", None) is not None:
+            w_pts.append(ds[int(self.session.width_w1_idx)])
+        if getattr(self.session, "width_w2_idx", None) is not None:
+            w_pts.append(ds[int(self.session.width_w2_idx)])
+        if len(w_pts) > 0:
+            self._add_points_actor(self.A_WIDTH_SAVED, np.asarray(w_pts), "orange", 14)
+        else:
+            self._remove_actor(self.A_WIDTH_SAVED)
+
     def _update_markers_temp(self):
-        """临时点：仅用于预览；关闭后清空（base红 tip蓝 ctrl绿）。"""
         if self.session.ds is None:
             return
         ds = self.session.get_ds_points()
 
-        # base temp
         if self.temp_base_idx is not None:
             p = ds[int(self.temp_base_idx)][None, :]
             self._add_points_actor(self.A_BASE_TEMP, p, "red", 18)
         else:
             self._remove_actor(self.A_BASE_TEMP)
 
-        # tip temp
         if self.temp_tip_idx is not None:
             p = ds[int(self.temp_tip_idx)][None, :]
             self._add_points_actor(self.A_TIP_TEMP, p, "blue", 18)
         else:
             self._remove_actor(self.A_TIP_TEMP)
 
-        # ctrl temp
         if len(self.temp_ctrl_indices) > 0:
             pts = ds[np.array(self.temp_ctrl_indices, dtype=int)]
             self._add_points_actor(self.A_CTRL_TEMP, pts, "green", 16)
         else:
             self._remove_actor(self.A_CTRL_TEMP)
 
+        w_pts = []
+        if self.temp_w1_idx is not None:
+            w_pts.append(ds[int(self.temp_w1_idx)])
+        if self.temp_w2_idx is not None:
+            w_pts.append(ds[int(self.temp_w2_idx)])
+        if len(w_pts) > 0:
+            self._add_points_actor(self.A_WIDTH_TEMP, np.asarray(w_pts), "orange", 16)
+        else:
+            self._remove_actor(self.A_WIDTH_TEMP)
+
+    def _update_labels_saved(self):
+        if self.session.ds is None:
+            self._remove_actor(self.A_LABELS_SAVED)
+            return
+        ds = self.session.get_ds_points()
+
+        pts = []
+        labels = []
+
+        if self.session.base_idx is not None:
+            pts.append(ds[int(self.session.base_idx)])
+            labels.append("B1")
+
+        if self.session.tip_idx is not None:
+            pts.append(ds[int(self.session.tip_idx)])
+            labels.append("T1")
+
+        for i, idx in enumerate(self.session.ctrl_indices, start=1):
+            pts.append(ds[int(idx)])
+            labels.append(f"C{i}")
+
+        if getattr(self.session, "width_w1_idx", None) is not None:
+            pts.append(ds[int(self.session.width_w1_idx)])
+            labels.append("W1")
+        if getattr(self.session, "width_w2_idx", None) is not None:
+            pts.append(ds[int(self.session.width_w2_idx)])
+            labels.append("W2")
+
+        if len(pts) > 0:
+            self._add_labels_actor(self.A_LABELS_SAVED, np.asarray(pts), labels)
+        else:
+            self._remove_actor(self.A_LABELS_SAVED)
+
+    def _update_labels_temp(self):
+        if self.session.ds is None:
+            self._remove_actor(self.A_LABELS_TEMP)
+            return
+        ds = self.session.get_ds_points()
+
+        pts = []
+        labels = []
+
+        if self.temp_base_idx is not None:
+            pts.append(ds[int(self.temp_base_idx)])
+            labels.append("B*")
+        if self.temp_tip_idx is not None:
+            pts.append(ds[int(self.temp_tip_idx)])
+            labels.append("T*")
+        for i, idx in enumerate(self.temp_ctrl_indices, start=1):
+            pts.append(ds[int(idx)])
+            labels.append(f"C*{i}")
+        if self.temp_w1_idx is not None:
+            pts.append(ds[int(self.temp_w1_idx)])
+            labels.append("W1*")
+        if self.temp_w2_idx is not None:
+            pts.append(ds[int(self.temp_w2_idx)])
+            labels.append("W2*")
+
+        if len(pts) > 0:
+            self._add_labels_actor(self.A_LABELS_TEMP, np.asarray(pts), labels)
+        else:
+            self._remove_actor(self.A_LABELS_TEMP)
+
+    # ----------------------------
+    # lines
+    # ----------------------------
     def _update_lines(self):
-        """线展示：当前结果优先，否则显示缓存。"""
-        # current results
         if self.session.centerline_result is not None:
             cl = np.asarray(self.session.centerline_result.smooth_points, dtype=np.float64)
             self._add_polyline_actor(self.A_LINE_CENTER_CUR, cl, "red", 4)
@@ -437,46 +633,79 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         else:
             self._remove_actor(self.A_LINE_CENTER_CUR)
 
-        if self.session.width_result is not None and self.session.width_result.max_item is not None:
-            it = self.session.width_result.max_item
-            seg = np.vstack([it.pL, it.pR])
-            self._add_polyline_actor(self.A_LINE_WIDTH_CUR, seg, "green", 6)
+        width_path = getattr(self.session, "width_path_points", None)
+        if width_path is not None and len(width_path) >= 2:
+            self._add_polyline_actor(self.A_LINE_WIDTH_CUR, np.asarray(width_path), "green", 6)
             self._remove_actor(self.A_LINE_WIDTH_CACHED)
         else:
             self._remove_actor(self.A_LINE_WIDTH_CUR)
 
-        # cached results (only if no current)
-        if (self.session.centerline_result is None) and (self.session.current_inst_id is not None):
-            cl, seg = self.session.get_cached_display(self.session.current_inst_id)
-            if cl is not None and len(cl) >= 2:
-                self._add_polyline_actor(self.A_LINE_CENTER_CACHED, np.asarray(cl, dtype=np.float64), "red", 4)
+        if (self.session.centerline_result is None or getattr(self.session, "width_path_points", None) is None) and (self.session.current_inst_id is not None):
+            cl_cached, width_cached = self.session.get_cached_display(self.session.current_inst_id)
+
+            if self.session.centerline_result is None:
+                if cl_cached is not None and len(cl_cached) >= 2:
+                    self._add_polyline_actor(self.A_LINE_CENTER_CACHED, np.asarray(cl_cached), "red", 4)
+                else:
+                    self._remove_actor(self.A_LINE_CENTER_CACHED)
             else:
                 self._remove_actor(self.A_LINE_CENTER_CACHED)
 
-            if seg is not None:
-                pL, pR = seg
-                self._add_polyline_actor(self.A_LINE_WIDTH_CACHED, np.vstack([pL, pR]), "green", 6)
+            if getattr(self.session, "width_path_points", None) is None:
+                if width_cached is not None and len(width_cached) >= 2:
+                    self._add_polyline_actor(self.A_LINE_WIDTH_CACHED, np.asarray(width_cached), "green", 6)
+                else:
+                    self._remove_actor(self.A_LINE_WIDTH_CACHED)
             else:
                 self._remove_actor(self.A_LINE_WIDTH_CACHED)
         else:
-            # 如果有 current，就隐藏 cached
             self._remove_actor(self.A_LINE_CENTER_CACHED)
             self._remove_actor(self.A_LINE_WIDTH_CACHED)
 
     # ----------------------------
-    # view mode changed (browse only)
+    # point list UI
     # ----------------------------
-    def on_view_mode_changed(self):
-        if self.session.cloud is None:
-            return
-        if not self.annotating:
-            self._show_browse_scene()
+    def _refresh_point_lists(self):
+        self.list_base.clear()
+        self.list_tip.clear()
+        self.list_ctrl.clear()
+        self.list_width.clear()
+
+        if self.session.base_idx is not None:
+            it = QListWidgetItem("B1")
+            it.setData(0x0100, ("base", 0))
+            self.list_base.addItem(it)
+
+        if self.session.tip_idx is not None:
+            it = QListWidgetItem("T1")
+            it.setData(0x0100, ("tip", 0))
+            self.list_tip.addItem(it)
+
+        for i, _ in enumerate(self.session.ctrl_indices, start=1):
+            it = QListWidgetItem(f"C{i}")
+            it.setData(0x0100, ("ctrl", i - 1))
+            self.list_ctrl.addItem(it)
+
+        if getattr(self.session, "width_w1_idx", None) is not None:
+            it = QListWidgetItem("W1")
+            it.setData(0x0100, ("w", 1))
+            self.list_width.addItem(it)
+        if getattr(self.session, "width_w2_idx", None) is not None:
+            it = QListWidgetItem("W2")
+            it.setData(0x0100, ("w", 2))
+            self.list_width.addItem(it)
+
+    def _invalidate_results_after_point_change(self):
+        self.session.centerline_result = None
+        self.session.width_path_points = None
+        if hasattr(self.session, "width_path_length"):
+            self.session.width_path_length = None
+        self._update_lines()
 
     # ----------------------------
-    # pick state machine (开启/关闭 & commit)
+    # pick state machine
     # ----------------------------
     def _enter_mode(self, mode: str):
-        """进入某模式：先退出当前模式并提交当前模式 temp，再进入新模式并清该模式 temp。"""
         if self.pick_mode != self.MODE_NONE:
             self._exit_current_mode(commit=True)
 
@@ -491,14 +720,21 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         elif mode == self.MODE_CTRL:
             self.temp_ctrl_indices = []
             self.btn_toggle_ctrl.setText("控制点选择：开启")
+        elif mode == self.MODE_WIDTH:
+            self.temp_w1_idx = None
+            self.temp_w2_idx = None
+            self.btn_toggle_width.setText("叶宽点选择：开启 (W1/W2)")
 
-        # 标注模式：不清保存点，只更新 temp layer
         self._update_markers_temp()
+        self._update_labels_temp()
         self.plotter.render()
-        self._update_status("提示：按住 Shift + 左键 选点；再次点击按钮关闭并保存。")
+
+        if mode == self.MODE_WIDTH:
+            self._update_status("叶宽点选择：Shift+左键依次选择 W1/W2；关闭后保存。")
+        else:
+            self._update_status("提示：Shift+左键选点；再次点击按钮关闭并保存。")
 
     def _exit_current_mode(self, commit: bool = True):
-        """退出当前模式：可选提交 temp -> session，并清 temp；关闭按钮状态；更新渲染。"""
         if commit:
             if self.pick_mode == self.MODE_BASE and self.temp_base_idx is not None:
                 self.session.set_base(self.temp_base_idx)
@@ -506,19 +742,25 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
                 self.session.set_tip(self.temp_tip_idx)
             if self.pick_mode == self.MODE_CTRL and len(self.temp_ctrl_indices) > 0:
                 self.session.extend_ctrl(self.temp_ctrl_indices)
+            if self.pick_mode == self.MODE_WIDTH:
+                if self.temp_w1_idx is not None:
+                    self.session.width_w1_idx = int(self.temp_w1_idx)
+                if self.temp_w2_idx is not None:
+                    self.session.width_w2_idx = int(self.temp_w2_idx)
 
-        # 清 temp（只清当前模式对应 temp）
         if self.pick_mode == self.MODE_BASE:
             self.temp_base_idx = None
         elif self.pick_mode == self.MODE_TIP:
             self.temp_tip_idx = None
         elif self.pick_mode == self.MODE_CTRL:
             self.temp_ctrl_indices = []
+        elif self.pick_mode == self.MODE_WIDTH:
+            self.temp_w1_idx = None
+            self.temp_w2_idx = None
 
         self.pick_mode = self.MODE_NONE
 
-        # 关闭 toggle（避免递归）
-        for b in [self.btn_toggle_base, self.btn_toggle_tip, self.btn_toggle_ctrl]:
+        for b in [self.btn_toggle_base, self.btn_toggle_tip, self.btn_toggle_ctrl, self.btn_toggle_width]:
             b.blockSignals(True)
             b.setChecked(False)
             b.blockSignals(False)
@@ -526,11 +768,16 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         self.btn_toggle_base.setText("叶基选择：关闭")
         self.btn_toggle_tip.setText("叶尖选择：关闭")
         self.btn_toggle_ctrl.setText("控制点选择：关闭")
+        self.btn_toggle_width.setText("叶宽点选择：关闭 (W1/W2)")
 
-        # 更新保存点（关闭后仍展示）+ 清 temp layer
         self._update_markers_saved()
         self._update_markers_temp()
+        self._update_labels_saved()
+        self._update_labels_temp()
+        self._update_lines()
         self.plotter.render()
+
+        self._refresh_point_lists()
 
     # ----------------------------
     # toggle slots
@@ -539,45 +786,71 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         if not self.annotating:
             return
         if checked:
-            # 互斥关闭其它
-            self.btn_toggle_tip.blockSignals(True);  self.btn_toggle_tip.setChecked(False);  self.btn_toggle_tip.blockSignals(False)
-            self.btn_toggle_ctrl.blockSignals(True); self.btn_toggle_ctrl.setChecked(False); self.btn_toggle_ctrl.blockSignals(False)
+            self._close_other_toggles(except_mode=self.MODE_BASE)
             self._enter_mode(self.MODE_BASE)
         else:
-            # 关闭：提交 base temp，保证红点保留
             if self.pick_mode == self.MODE_BASE:
                 self._exit_current_mode(commit=True)
+                self._invalidate_results_after_point_change()
+                self._maybe_recommend_width_and_refresh()
                 self._update_status("叶基选择关闭：叶基点已保存并保留显示。")
 
     def on_toggle_tip(self, checked: bool):
         if not self.annotating:
             return
         if checked:
-            self.btn_toggle_base.blockSignals(True); self.btn_toggle_base.setChecked(False); self.btn_toggle_base.blockSignals(False)
-            self.btn_toggle_ctrl.blockSignals(True); self.btn_toggle_ctrl.setChecked(False); self.btn_toggle_ctrl.blockSignals(False)
+            self._close_other_toggles(except_mode=self.MODE_TIP)
             self._enter_mode(self.MODE_TIP)
         else:
             if self.pick_mode == self.MODE_TIP:
                 self._exit_current_mode(commit=True)
+                self._invalidate_results_after_point_change()
+                self._maybe_recommend_width_and_refresh()
                 self._update_status("叶尖选择关闭：叶尖点已保存并保留显示。")
 
     def on_toggle_ctrl(self, checked: bool):
         if not self.annotating:
             return
         if checked:
-            self.btn_toggle_base.blockSignals(True); self.btn_toggle_base.setChecked(False); self.btn_toggle_base.blockSignals(False)
-            self.btn_toggle_tip.blockSignals(True);  self.btn_toggle_tip.setChecked(False);  self.btn_toggle_tip.blockSignals(False)
+            self._close_other_toggles(except_mode=self.MODE_CTRL)
             self._enter_mode(self.MODE_CTRL)
         else:
             if self.pick_mode == self.MODE_CTRL:
                 self._exit_current_mode(commit=True)
+                self._invalidate_results_after_point_change()
+                self._maybe_recommend_width_and_refresh()
                 self._update_status("控制点选择关闭：控制点已保存并保留显示。")
 
+    def on_toggle_width(self, checked: bool):
+        if not self.annotating:
+            return
+        if checked:
+            self._close_other_toggles(except_mode=self.MODE_WIDTH)
+            self._enter_mode(self.MODE_WIDTH)
+        else:
+            if self.pick_mode == self.MODE_WIDTH:
+                self._exit_current_mode(commit=True)
+                self._invalidate_results_after_point_change()
+                self._update_status("叶宽点选择关闭：W1/W2 已保存并保留显示。")
+
+    def _close_other_toggles(self, except_mode: str):
+        mapping = {
+            self.MODE_BASE: self.btn_toggle_base,
+            self.MODE_TIP: self.btn_toggle_tip,
+            self.MODE_CTRL: self.btn_toggle_ctrl,
+            self.MODE_WIDTH: self.btn_toggle_width,
+        }
+        for mode, btn in mapping.items():
+            if mode == except_mode:
+                continue
+            if btn.isChecked():
+                self._exit_current_mode(commit=True)
+                break
+
     # ----------------------------
-    # pick callback (由 VTK picker 调用)
+    # pick callback
     # ----------------------------
     def on_picked_point(self, point_xyz):
-        """point_xyz: 3D 坐标（世界坐标）。"""
         if point_xyz is None or self.pick_mode == self.MODE_NONE:
             return
         if self.session.ds is None:
@@ -592,10 +865,97 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
             self.temp_tip_idx = idx
         elif self.pick_mode == self.MODE_CTRL:
             self.temp_ctrl_indices.append(idx)
+        elif self.pick_mode == self.MODE_WIDTH:
+            if self.temp_w1_idx is None:
+                self.temp_w1_idx = idx
+            elif self.temp_w2_idx is None:
+                self.temp_w2_idx = idx
+            else:
+                self.temp_w2_idx = idx
 
-        # 只更新 temp layer（保存点仍在）
         self._update_markers_temp()
+        self._update_labels_temp()
         self.plotter.render()
+
+    # ----------------------------
+    # delete actions
+    # ----------------------------
+    def on_delete_base(self):
+        if self.session.base_idx is None:
+            return
+        self.session.base_idx = None
+        self._invalidate_results_after_point_change()
+        self._update_markers_saved()
+        self._update_labels_saved()
+        self.plotter.render()
+        self._refresh_point_lists()
+        self._update_status("已删除叶基点。")
+
+    def on_delete_tip(self):
+        if self.session.tip_idx is None:
+            return
+        self.session.tip_idx = None
+        self._invalidate_results_after_point_change()
+        self._update_markers_saved()
+        self._update_labels_saved()
+        self.plotter.render()
+        self._refresh_point_lists()
+        self._update_status("已删除叶尖点。")
+
+    def on_delete_ctrl(self):
+        it = self.list_ctrl.currentItem()
+        if it is None:
+            return
+        info = it.data(0x0100)
+        if not info or info[0] != "ctrl":
+            return
+        idx_in_list = int(info[1])
+        if 0 <= idx_in_list < len(self.session.ctrl_indices):
+            self.session.ctrl_indices.pop(idx_in_list)
+
+        self._invalidate_results_after_point_change()
+        self._update_markers_saved()
+        self._update_labels_saved()
+        self.plotter.render()
+        self._refresh_point_lists()
+        self._maybe_recommend_width_and_refresh()
+        self._update_status("已删除选中的控制点。")
+
+    def on_delete_width(self):
+        it = self.list_width.currentItem()
+        if it is None:
+            return
+        info = it.data(0x0100)
+        if not info or info[0] != "w":
+            return
+        which = int(info[1])  # 1 or 2
+
+        w2 = getattr(self.session, "width_w2_idx", None)
+
+        if which == 1:
+            if w2 is not None:
+                self.session.width_w1_idx = int(w2)
+                self.session.width_w2_idx = None
+            else:
+                self.session.width_w1_idx = None
+        else:
+            self.session.width_w2_idx = None
+
+        self._invalidate_results_after_point_change()
+        self._update_markers_saved()
+        self._update_labels_saved()
+        self.plotter.render()
+        self._refresh_point_lists()
+        self._update_status("已删除选中的叶宽点。")
+
+    # ----------------------------
+    # view mode changed (browse only)
+    # ----------------------------
+    def on_view_mode_changed(self):
+        if self.session.cloud is None:
+            return
+        if not self.annotating:
+            self._show_browse_scene()
 
     # ----------------------------
     # UI actions
@@ -626,9 +986,12 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         self.temp_base_idx = None
         self.temp_tip_idx = None
         self.temp_ctrl_indices = []
+        self.temp_w1_idx = None
+        self.temp_w2_idx = None
 
         self._update_buttons()
         self._show_browse_scene()
+        self._refresh_point_lists()
         self._update_status("浏览模式：可切换 RGB / Semantic / Instance 显示整株。")
 
     def on_start_annotation(self):
@@ -643,19 +1006,34 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
             return
 
         self.annotating = True
-        self._exit_current_mode(commit=False)  # 关闭所有toggle + 清temp（不提交）
-        self._update_buttons()
 
-        # 切 inst 后 session 可能恢复保存点（已标注时）
+        self.pick_mode = self.MODE_NONE
+        self.temp_base_idx = None
+        self.temp_tip_idx = None
+        self.temp_ctrl_indices = []
+        self.temp_w1_idx = None
+        self.temp_w2_idx = None
+
+        self.session.centerline_result = None
+        self.session.width_path_points = None
+
+        self._update_buttons()
         self._show_annotate_scene()
-        extra = "该实例已标注：已恢复 base/tip/ctrl，并显示缓存中心线/宽线。" if self.session.is_current_annotated() else "该实例未标注。"
+        self._refresh_point_lists()
+
+        extra = "该实例已标注：已恢复 base/tip/ctrl/W1/W2，并显示缓存中心线/宽线。" if self.session.is_current_annotated() else "该实例未标注。"
         self._update_status(f"已进入标注模式：inst_id={inst_id}\n{extra}\n提示：Shift+左键选点。")
+
+        self._maybe_recommend_width_and_refresh()
 
     def on_back_browse(self):
         self.annotating = False
-        self._exit_current_mode(commit=True)  # 可选：退出前提交临时点
+        if self.pick_mode != self.MODE_NONE:
+            self._exit_current_mode(commit=True)
+
         self._update_buttons()
         self._show_browse_scene()
+        self._refresh_point_lists()
         self._update_status("已返回浏览模式：显示整株点云。")
 
     def on_inst_changed(self):
@@ -664,67 +1042,74 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
             return
         if self.combo_inst.count() == 0:
             return
-
         try:
-            # 切换前：退出当前模式并提交 temp（避免丢）
-            self._exit_current_mode(commit=True)
+            if self.pick_mode != self.MODE_NONE:
+                self._exit_current_mode(commit=True)
 
             inst_id = int(self.combo_inst.currentText())
             self.session.select_instance(inst_id)
 
-            # 切换后清 temp
             self.temp_base_idx = None
             self.temp_tip_idx = None
             self.temp_ctrl_indices = []
+            self.temp_w1_idx = None
+            self.temp_w2_idx = None
 
-            # 清当前计算结果显示（如果你希望切 inst 后不带着上一个 current）
             self.session.centerline_result = None
-            self.session.width_result = None
+            self.session.width_path_points = None
 
             self._update_buttons()
             self._show_annotate_scene()
+            self._refresh_point_lists()
 
-            extra = "该实例已标注：已恢复 base/tip/ctrl，并显示缓存中心线/宽线。" if self.session.is_current_annotated() else "该实例未标注。"
+            extra = "该实例已标注：已恢复 base/tip/ctrl/W1/W2，并显示缓存中心线/宽线。" if self.session.is_current_annotated() else "该实例未标注。"
             self._update_status(f"切换实例：inst_id={inst_id}\n{extra}\n提示：Shift+左键选点。")
+
+            self._maybe_recommend_width_and_refresh()
+
         except Exception as e:
             QMessageBox.critical(self, "切换实例失败", str(e))
 
     def on_clear_ctrl(self):
-        # 清已保存控制点 + 清临时控制点
         self.session.clear_ctrl()
         self.temp_ctrl_indices = []
+        self._invalidate_results_after_point_change()
         if self.annotating:
             self._update_markers_saved()
             self._update_markers_temp()
+            self._update_labels_saved()
+            self._update_labels_temp()
             self.plotter.render()
+        self._refresh_point_lists()
+        self._maybe_recommend_width_and_refresh()
         self._update_status("已清空控制点（已保存 + 临时）。")
 
     def on_compute(self):
-        # 计算前：退出点选模式并提交 temp，确保 base/tip/ctrl 都已保存
-        self._exit_current_mode(commit=True)
+        if self.pick_mode != self.MODE_NONE:
+            self._exit_current_mode(commit=True)
 
         try:
             self.session.compute()
-            self.session.commit_current(include_width_profile=False)
+            self.session.commit_current(False)
         except Exception as e:
             QMessageBox.critical(self, "计算失败", str(e))
             return
 
-        # 更新线层（current 优先）
         if self.annotating:
+            self._update_markers_saved()
+            self._update_labels_saved()
             self._update_lines()
             self.plotter.render()
 
         self._update_buttons()
+        self._refresh_point_lists()
 
         L = self.session.centerline_result.length if self.session.centerline_result else None
-        if self.session.width_result is None or self.session.width_result.max_item is None:
-            self._update_status(
-                f"计算并保存完成：叶长={L:.6f}\n未找到有效宽度：可调大 slab_half/radius 或减小 step。"
-            )
+        wlen = getattr(self.session, "width_path_length", None)
+        if wlen is None:
+            self._update_status(f"计算并保存完成：叶长={L:.6f}\n叶宽：未设置 W1/W2 或最短路径不可达。")
         else:
-            wmax = self.session.width_result.max_item.width
-            self._update_status(f"计算并保存完成：叶长={L:.6f} | 最大叶宽={wmax:.6f}")
+            self._update_status(f"计算并保存完成：叶长={L:.6f} | 叶宽(最短路径长度)={wlen:.6f}")
 
     def on_export_all(self):
         if self.session.get_annotations_count() == 0:
