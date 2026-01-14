@@ -3,6 +3,7 @@ import os
 import numpy as np
 from dataclasses import dataclass
 from typing import List, Optional, Dict, Any, Tuple
+from types import SimpleNamespace
 
 from scipy.spatial import cKDTree
 from scipy.sparse import csr_matrix
@@ -22,8 +23,8 @@ class AnnotationParams:
 
     # 旧“最大叶宽”估计参数（用于推荐）
     step: float = 0.01
-    slab_half: float = 0.005
-    radius: float = 0.10
+    slab_half: float = 0.1
+    radius: float = 0.1
     min_slice_pts: int = 60
 
 
@@ -31,6 +32,28 @@ def _polyline_length(P: Optional[np.ndarray]) -> Optional[float]:
     if P is None or len(P) < 2:
         return None
     return float(np.linalg.norm(P[1:] - P[:-1], axis=1).sum())
+
+
+def _resample_polyline_step(P: np.ndarray, step: float) -> np.ndarray:
+    if P is None or len(P) < 2:
+        return np.asarray(P).copy()
+    seg = np.linalg.norm(P[1:] - P[:-1], axis=1)
+    s = np.concatenate([[0.0], np.cumsum(seg)])
+    L = s[-1]
+    if L <= 1e-12 or step <= 0:
+        return P.copy()
+    m = max(2, int(np.floor(L / step)) + 1)
+    s_new = np.linspace(0, L, m)
+
+    out = []
+    j = 0
+    for sn in s_new:
+        while j < len(s) - 2 and s[j + 1] < sn:
+            j += 1
+        denom = (s[j + 1] - s[j])
+        t = 0.0 if abs(denom) < 1e-12 else (sn - s[j]) / denom
+        out.append((1 - t) * P[j] + t * P[j + 1])
+    return np.array(out)
 
 
 def _build_knn_graph(points: np.ndarray, k: int) -> csr_matrix:
@@ -256,6 +279,114 @@ class LeafAnnotationSession:
         pts = self.ds.points[np.array(clean, dtype=np.int64)]
         return pts
 
+    def compute_centerline(self, use_ctrl: bool = True):
+        """
+        叶长（中心线）两步：
+        1）在 downsample 点云上构建 kNN 图，分段最短路径：
+           - use_ctrl=False：B1 -> T1
+           - use_ctrl=True： B1 -> C1 -> ... -> T1
+        2）对最短路按 step 等距重采样，并在每个 step 内局部“薄片”修正到质心附近的点。
+        结果写入 self.centerline_result（含 smooth_points/length/path_indices）。
+        """
+        if self.ds is None:
+            raise RuntimeError("请先选择实例。")
+        if self.base_idx is None or self.tip_idx is None:
+            raise RuntimeError("请先选择叶基(B1)和叶尖(T1)。")
+
+        chain: List[int] = [int(self.base_idx)]
+        if use_ctrl and len(self.ctrl_indices) > 0:
+            chain += [int(i) for i in self.ctrl_indices]
+        chain.append(int(self.tip_idx))
+
+        pts = self.ds.points
+        G = _build_knn_graph(pts, k=self.params.k)
+
+        path_all: List[int] = []
+        for a, b in zip(chain[:-1], chain[1:]):
+            pidx = _shortest_path_indices(G, int(a), int(b))
+            if pidx is None or len(pidx) == 0:
+                raise RuntimeError("kNN 图不连通：起点到终点不可达。请增大 k 或减小 voxel。")
+            if path_all:
+                pidx = pidx[1:]
+            path_all.extend([int(i) for i in pidx])
+
+        path_all_arr = np.asarray(path_all, dtype=np.int64)
+        poly = pts[path_all_arr]
+
+        # Step 等距重采样 + 局部圆柱修正（按 step 线段）
+        step = float(self.params.step)
+        radius = float(self.params.radius)
+        min_slice_pts = int(self.params.min_slice_pts)
+
+        P_rs = _resample_polyline_step(poly, step=step)
+
+        refined_idx: List[int] = []
+        refined_pts: List[np.ndarray] = []
+
+        def _dist_to_segment(points: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+            ab = b - a
+            denom = float(np.dot(ab, ab))
+            if denom <= 1e-12:
+                return np.linalg.norm(points - a, axis=1)
+            t = (points - a) @ ab / denom
+            t = np.clip(t, 0.0, 1.0)
+            proj = a + np.outer(t, ab)
+            return np.linalg.norm(points - proj, axis=1)
+
+        for i, p in enumerate(P_rs):
+            p = np.asarray(p, dtype=np.float64)
+            if i == 0:
+                a = p
+                b = P_rs[min(1, len(P_rs) - 1)]
+            elif i == len(P_rs) - 1:
+                a = P_rs[i - 1]
+                b = p
+            else:
+                a = P_rs[i - 1]
+                b = P_rs[i + 1]
+
+            seg_len = float(np.linalg.norm(b - a))
+            search_r = radius + 0.5 * seg_len
+            cand_idx_list = self.ds_tree.query_ball_point(p, r=search_r) if self.ds_tree is not None else []
+            if cand_idx_list is None:
+                cand_idx_list = []
+            cand_idx = np.asarray(cand_idx_list, dtype=np.int64)
+            cand_pts = pts[cand_idx] if len(cand_idx) > 0 else np.empty((0, 3))
+
+            # 圆柱约束：点到 step 线段的垂直距离 <= radius
+            if len(cand_pts) > 0:
+                d = _dist_to_segment(cand_pts, a, b)
+                mask = d <= radius
+                cand_idx = cand_idx[mask]
+                cand_pts = cand_pts[mask]
+
+            if len(cand_pts) >= max(1, min_slice_pts):
+                c = cand_pts.mean(axis=0)
+                d = np.linalg.norm(cand_pts - c, axis=1)
+                j = int(np.argmin(d))
+                refined_idx.append(int(cand_idx[j]))
+                refined_pts.append(cand_pts[j])
+            elif len(cand_pts) > 0:
+                # 有点但不足 min_slice_pts，取最近
+                d = np.linalg.norm(cand_pts - p, axis=1)
+                j = int(np.argmin(d))
+                refined_idx.append(int(cand_idx[j]))
+                refined_pts.append(cand_pts[j])
+            else:
+                # 无候选，直接 snap 最近点
+                _, j = self.ds_tree.query(p, k=1) if self.ds_tree is not None else (0.0, 0)
+                refined_idx.append(int(j))
+                refined_pts.append(pts[int(j)])
+
+        refined_poly = np.asarray(refined_pts, dtype=np.float64)
+        L = _polyline_length(refined_poly)
+        self.centerline_result = SimpleNamespace(
+            smooth_points=refined_poly,
+            length=float(L if L is not None else 0.0),
+            path_indices=np.asarray(refined_idx, dtype=np.int64),
+        )
+        return self.centerline_result
+
     # ---------- width recommendation ----------
     def recommend_width_endpoints(self, overwrite: bool = False) -> bool:
         """
@@ -275,8 +406,11 @@ class LeafAnnotationSession:
             if self.width_w1_idx is not None or self.width_w2_idx is not None:
                 return False
 
-        # 叶长路径点（直接连接）
-        length_poly = self.build_length_polyline()
+        # 优先使用已生成的叶长（最短路径/带控制点），否则用直连折线
+        if self.centerline_result is not None:
+            length_poly = np.asarray(self.centerline_result.smooth_points, dtype=np.float64)
+        else:
+            length_poly = self.build_length_polyline()
 
         # 用旧 WidthEstimator 找最大叶宽段
         we = WidthEstimator(
@@ -306,7 +440,7 @@ class LeafAnnotationSession:
     # ---------- compute ----------
     def compute(self):
         """
-        - 叶长：不平滑，直接折线连接（B1->ctrl...->T1）
+        - 叶长：优先用 kNN 图最短路径 + step 重采样薄片修正（B1->ctrl...->T1），失败则回退为直连折线
         - 叶宽：若有 W1/W2（用户或推荐），则计算最短路径（kNN 图）
         """
         if self.leaf_pts is None or self.ds is None:
@@ -314,14 +448,16 @@ class LeafAnnotationSession:
         if self.base_idx is None or self.tip_idx is None:
             raise RuntimeError("请先选择叶基(B1)和叶尖(T1)。")
 
-        from types import SimpleNamespace
-
-        length_poly = self.build_length_polyline()
-        L = _polyline_length(length_poly)
-        self.centerline_result = SimpleNamespace(
-            smooth_points=length_poly,
-            length=float(L if L is not None else 0.0),
-        )
+        try:
+            self.compute_centerline(use_ctrl=True)
+        except Exception:
+            length_poly = self.build_length_polyline()
+            L = _polyline_length(length_poly)
+            self.centerline_result = SimpleNamespace(
+                smooth_points=length_poly,
+                length=float(L if L is not None else 0.0),
+                path_indices=None,
+            )
 
         # 如果用户没设置 W1/W2，就推荐一次
         self.recommend_width_endpoints(overwrite=False)

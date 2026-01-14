@@ -6,6 +6,7 @@ import vtk
 from pyvistaqt import QtInteractor
 
 from PyQt5 import QtWidgets
+from PyQt5 import QtCore
 from PyQt5.QtWidgets import QFileDialog, QMessageBox, QListWidgetItem
 
 from core.annotation import LeafAnnotationSession, AnnotationParams
@@ -104,9 +105,19 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(root)
         layout = QtWidgets.QHBoxLayout(root)
 
-        # ---------- left panel ----------
-        panel = QtWidgets.QVBoxLayout()
-        layout.addLayout(panel, 0)
+        # ---------- left panel (scrollable) ----------
+        panel_widget = QtWidgets.QWidget()
+        panel = QtWidgets.QVBoxLayout(panel_widget)
+        panel.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        scroll.setWidget(panel_widget)
+
+        layout.addWidget(scroll, 0)
 
         self.btn_load = QtWidgets.QPushButton("加载整株点云")
         panel.addWidget(self.btn_load)
@@ -141,6 +152,12 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         panel.addWidget(self.btn_toggle_tip)
         panel.addWidget(self.btn_toggle_ctrl)
         panel.addWidget(self.btn_toggle_width)
+
+        # 叶长推荐/生成
+        self.btn_recommend_length = QtWidgets.QPushButton("推荐叶长（B1→T1 最短路径）")
+        self.btn_generate_length = QtWidgets.QPushButton("生成叶长（使用控制点）")
+        panel.addWidget(self.btn_recommend_length)
+        panel.addWidget(self.btn_generate_length)
 
         # ✅ 新增：推荐叶宽按钮（强制重新推荐并展示）
         self.btn_recommend_width = QtWidgets.QPushButton("推荐叶宽（最大叶宽）")
@@ -215,6 +232,9 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         self.btn_toggle_ctrl.toggled.connect(self.on_toggle_ctrl)
         self.btn_toggle_width.toggled.connect(self.on_toggle_width)
 
+        self.btn_recommend_length.clicked.connect(self.on_recommend_length)
+        self.btn_generate_length.clicked.connect(self.on_generate_length)
+
         self.btn_del_base.clicked.connect(self.on_delete_base)
         self.btn_del_tip.clicked.connect(self.on_delete_tip)
         self.btn_del_ctrl.clicked.connect(self.on_delete_ctrl)
@@ -263,6 +283,7 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         in_anno = self.annotating
         for b in [
             self.btn_toggle_base, self.btn_toggle_tip, self.btn_toggle_ctrl, self.btn_toggle_width,
+            self.btn_recommend_length, self.btn_generate_length,
             self.btn_recommend_width,  # ✅
             self.btn_del_base, self.btn_del_tip, self.btn_del_ctrl, self.btn_del_width,
             self.btn_clear_ctrl, self.btn_compute
@@ -489,6 +510,52 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
             self._update_status("已推荐叶宽点：W1/W2 已更新（橙色点），并显示最短路径（绿色线）。")
         except Exception as e:
             QMessageBox.critical(self, "推荐失败", str(e))
+
+    def on_recommend_length(self):
+        """
+        推荐叶长：仅用 B1/T1，在 kNN 图上求最短路径并显示红线。
+        """
+        if not self.annotating:
+            return
+
+        if self.pick_mode != self.MODE_NONE:
+            self._exit_current_mode(commit=True)
+
+        if self.session.base_idx is None or self.session.tip_idx is None:
+            QMessageBox.information(self, "提示", "请先完成叶基(B1)和叶尖(T1)选择。")
+            return
+
+        try:
+            self.session.compute_centerline(use_ctrl=False)
+            self._update_lines()
+            self.plotter.render()
+            L = self.session.centerline_result.length if self.session.centerline_result else None
+            self._update_status(f"已推荐叶长（B1→T1 最短路径）：叶长={L:.6f}")
+        except Exception as e:
+            QMessageBox.critical(self, "推荐叶长失败", str(e))
+
+    def on_generate_length(self):
+        """
+        生成叶长：用 B1/控制点/T1 在 kNN 图上求分段最短路径并显示红线。
+        """
+        if not self.annotating:
+            return
+
+        if self.pick_mode != self.MODE_NONE:
+            self._exit_current_mode(commit=True)
+
+        if self.session.base_idx is None or self.session.tip_idx is None:
+            QMessageBox.information(self, "提示", "请先完成叶基(B1)和叶尖(T1)选择（可选控制点）。")
+            return
+
+        try:
+            self.session.compute_centerline(use_ctrl=True)
+            self._update_lines()
+            self.plotter.render()
+            L = self.session.centerline_result.length if self.session.centerline_result else None
+            self._update_status(f"已生成叶长（使用控制点）：叶长={L:.6f}")
+        except Exception as e:
+            QMessageBox.critical(self, "生成叶长失败", str(e))
 
     # ----------------------------
     # markers + labels
