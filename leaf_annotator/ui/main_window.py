@@ -31,7 +31,19 @@ def stable_color_from_id(_id: int) -> np.ndarray:
 def colors_from_labels(labels: np.ndarray) -> np.ndarray:
     labels = labels.astype(np.int64)
     uniq = np.unique(labels)
-    lut = {int(k): stable_color_from_id(int(k)) for k in uniq}
+    lut = {}
+    for k in uniq:
+        kk = int(k)
+        if kk == -1:
+            lut[kk] = np.array([128, 128, 128], dtype=np.uint8)
+        elif kk == 0:
+            lut[kk] = np.array([255, 0, 0], dtype=np.uint8)
+        elif kk == 1:
+            lut[kk] = np.array([0, 255, 0], dtype=np.uint8)
+        elif kk == 2:
+            lut[kk] = np.array([0, 0, 255], dtype=np.uint8)
+        else:
+            lut[kk] = stable_color_from_id(kk)
     out = np.zeros((len(labels), 3), dtype=np.uint8)
     for k in uniq:
         out[labels == k] = lut[int(k)]
@@ -51,6 +63,7 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
     MODE_TIP = "PICK_TIP"
     MODE_CTRL = "PICK_CTRL"
     MODE_WIDTH = "PICK_WIDTH"
+    MODE_WIDTH_CTRL = "PICK_WIDTH_CTRL"
 
     # actor names
     A_CLOUD_FULL = "cloud_full"
@@ -60,11 +73,13 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
     A_TIP_SAVED = "mark_tip_saved"
     A_CTRL_SAVED = "mark_ctrl_saved"
     A_WIDTH_SAVED = "mark_width_saved"
+    A_WIDTH_CTRL_SAVED = "mark_width_ctrl_saved"
 
     A_BASE_TEMP = "mark_base_temp"
     A_TIP_TEMP = "mark_tip_temp"
     A_CTRL_TEMP = "mark_ctrl_temp"
     A_WIDTH_TEMP = "mark_width_temp"
+    A_WIDTH_CTRL_TEMP = "mark_width_ctrl_temp"
 
     A_LABELS_SAVED = "labels_saved"
     A_LABELS_TEMP = "labels_temp"
@@ -76,7 +91,58 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Corn Leaf 3D Annotation (PyVista)")
+        self.setWindowTitle("植物表型标注工具")
+        self._settings = QtCore.QSettings("LeafAnnotator", "3d_plant_phenotype")
+
+        menu = self.menuBar()
+        file_menu = menu.addMenu("文件")
+        self.act_load = file_menu.addAction("加载点云")
+        self.act_export_dir = file_menu.addAction("导出目录")
+        file_menu.addSeparator()
+        self.act_quit = file_menu.addAction("退出")
+
+        help_menu = menu.addMenu("帮助")
+        self.act_help = help_menu.addAction("快捷键/说明")
+
+        view_menu = menu.addMenu("显示")
+        self.act_view_rgb = view_menu.addAction("RGB")
+        self.act_view_sem = view_menu.addAction("语义")
+        self.act_view_inst = view_menu.addAction("实例")
+        self.act_view_label = view_menu.addAction("标签")
+        for a in [self.act_view_rgb, self.act_view_sem, self.act_view_inst, self.act_view_label]:
+            a.setCheckable(True)
+        self.view_group = QtWidgets.QActionGroup(self)
+        self.view_group.setExclusive(True)
+        self.view_group.addAction(self.act_view_rgb)
+        self.view_group.addAction(self.act_view_sem)
+        self.view_group.addAction(self.act_view_inst)
+        self.view_group.addAction(self.act_view_label)
+        self.act_view_rgb.setChecked(True)
+
+        inst_menu = menu.addMenu("实例")
+        self.act_select_inst = inst_menu.addAction("选择实例...")
+
+        anno_menu = menu.addMenu("标注")
+        self.act_start_anno = anno_menu.addAction("进入标注模式")
+        self.act_back_browse = anno_menu.addAction("返回浏览模式")
+
+        pick_menu = menu.addMenu("拾取")
+        self.act_pick_base = pick_menu.addAction("叶基")
+        self.act_pick_tip = pick_menu.addAction("叶尖")
+        self.act_pick_ctrl = pick_menu.addAction("叶长控制点")
+        self.act_pick_width = pick_menu.addAction("叶宽端点")
+        self.act_pick_width_ctrl = pick_menu.addAction("叶宽控制点")
+        for a in [self.act_pick_base, self.act_pick_tip, self.act_pick_ctrl, self.act_pick_width, self.act_pick_width_ctrl]:
+            a.setCheckable(True)
+
+        calc_menu = menu.addMenu("计算")
+        self.act_recommend_length = calc_menu.addAction("推荐叶长")
+        self.act_generate_length = calc_menu.addAction("生成叶长")
+        self.act_recommend_width = calc_menu.addAction("推荐叶宽")
+        calc_menu.addSeparator()
+        self.act_compute = calc_menu.addAction("计算")
+        self.act_export_labeled = calc_menu.addAction("生成标记点云")
+        self.act_save_labels = menu.addAction("保存标注（JSON+Label）")
 
         schema = CloudSchema(xyz_slice=slice(0, 3), sem_col=-2, inst_col=-1, rgb_slice=slice(3, 6))
         self.session = LeafAnnotationSession(params=AnnotationParams(), schema=schema)
@@ -88,6 +154,7 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         self.temp_base_idx = None
         self.temp_tip_idx = None
         self.temp_ctrl_indices = []
+        self.temp_width_ctrl_indices = []
 
         # 叶宽两点：临时（开启期间）
         self.temp_w1_idx = None
@@ -119,98 +186,73 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
 
         layout.addWidget(scroll, 0)
 
-        self.btn_load = QtWidgets.QPushButton("加载整株点云")
-        panel.addWidget(self.btn_load)
-
-        panel.addSpacing(6)
-        panel.addWidget(QtWidgets.QLabel("显示模式（浏览模式有效）"))
+        # ---------- hidden controls (menu driven) ----------
+        self.btn_load = QtWidgets.QPushButton("加载点云")
         self.combo_view = QtWidgets.QComboBox()
-        self.combo_view.addItems(["RGB", "Semantic", "Instance"])
-        panel.addWidget(self.combo_view)
-
-        panel.addSpacing(6)
-        panel.addWidget(QtWidgets.QLabel("实例 inst_id（用于标注）"))
+        self.combo_view.addItems(["RGB", "语义", "实例", "标签"])
         self.combo_inst = QtWidgets.QComboBox()
-        panel.addWidget(self.combo_inst)
-
-        self.btn_start_anno = QtWidgets.QPushButton("进入标注模式（只显示当前实例）")
+        self.btn_start_anno = QtWidgets.QPushButton("进入标注模式（仅显示当前实例）")
         self.btn_back_browse = QtWidgets.QPushButton("返回浏览模式（显示整株）")
-        panel.addWidget(self.btn_start_anno)
-        panel.addWidget(self.btn_back_browse)
 
-        panel.addSpacing(8)
-
-        # Toggle buttons：开启/关闭
         self.btn_toggle_base = QtWidgets.QPushButton("叶基选择：关闭")
         self.btn_toggle_tip = QtWidgets.QPushButton("叶尖选择：关闭")
-        self.btn_toggle_ctrl = QtWidgets.QPushButton("控制点选择：关闭")
-        self.btn_toggle_width = QtWidgets.QPushButton("叶宽点选择：关闭 (W1/W2)")
-        for b in [self.btn_toggle_base, self.btn_toggle_tip, self.btn_toggle_ctrl, self.btn_toggle_width]:
+        self.btn_toggle_ctrl = QtWidgets.QPushButton("叶长控制点选择：关闭")
+        self.btn_toggle_width = QtWidgets.QPushButton("叶宽端点选择：关闭 (W1/W2)")
+        self.btn_toggle_width_ctrl = QtWidgets.QPushButton("叶宽控制点选择：关闭")
+        for b in [self.btn_toggle_base, self.btn_toggle_tip, self.btn_toggle_ctrl, self.btn_toggle_width, self.btn_toggle_width_ctrl]:
             b.setCheckable(True)
 
-        panel.addWidget(self.btn_toggle_base)
-        panel.addWidget(self.btn_toggle_tip)
-        panel.addWidget(self.btn_toggle_ctrl)
-        panel.addWidget(self.btn_toggle_width)
+        self.btn_recommend_length = QtWidgets.QPushButton("推荐叶长（B1→T1）")
+        self.btn_generate_length = QtWidgets.QPushButton("生成叶长（B1 + 控制点 + T1）")
+        self.btn_recommend_width = QtWidgets.QPushButton("推荐叶宽（沿当前叶长）")
 
-        # 叶长推荐/生成
-        self.btn_recommend_length = QtWidgets.QPushButton("推荐叶长（B1→T1 最短路径）")
-        self.btn_generate_length = QtWidgets.QPushButton("生成叶长（使用控制点）")
-        panel.addWidget(self.btn_recommend_length)
-        panel.addWidget(self.btn_generate_length)
+        self.btn_delete = QtWidgets.QPushButton("删除选中标记")
+        self.btn_rename_ctrl = QtWidgets.QPushButton("重命名叶长控制点顺序 (C#)")
+        self.btn_rename_width_ctrl = QtWidgets.QPushButton("重命名叶宽控制点顺序 (WC#)")
 
-        # ✅ 新增：推荐叶宽按钮（强制重新推荐并展示）
-        self.btn_recommend_width = QtWidgets.QPushButton("推荐叶宽（最大叶宽）")
-        panel.addWidget(self.btn_recommend_width)
+        self.btn_compute = QtWidgets.QPushButton("计算并保存（叶长 + 叶宽路径）")
+        self.btn_export = QtWidgets.QPushButton("保存标注（JSON+Label）")
 
-        panel.addSpacing(8)
+        # ---------- status ----------
+        self.info = QtWidgets.QLabel("状态：未加载")
+        self.info.setWordWrap(True)
+        status_group = QtWidgets.QGroupBox("状态信息")
+        status_layout = QtWidgets.QVBoxLayout(status_group)
+        status_layout.addWidget(self.info)
+        panel.addWidget(status_group)
 
-        # ------- point lists + delete -------
-        panel.addWidget(QtWidgets.QLabel("点列表（选择编号后删除）"))
-
+        # ---------- marker lists ----------
+        points_group = QtWidgets.QGroupBox("标记信息")
+        points_layout = QtWidgets.QVBoxLayout(points_group)
         self.list_base = QtWidgets.QListWidget()
         self.list_tip = QtWidgets.QListWidget()
         self.list_ctrl = QtWidgets.QListWidget()
         self.list_width = QtWidgets.QListWidget()
-
+        self.list_width_ctrl = QtWidgets.QListWidget()
         self.list_base.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.list_tip.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.list_ctrl.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.list_width.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.list_width_ctrl.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.list_ctrl.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.list_width_ctrl.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.list_base.setMaximumHeight(55)
+        self.list_tip.setMaximumHeight(55)
+        self.list_width.setMaximumHeight(65)
+        self.list_ctrl.setMaximumHeight(120)
+        self.list_width_ctrl.setMaximumHeight(120)
+        points_layout.addWidget(QtWidgets.QLabel("叶基 (B1)"))
+        points_layout.addWidget(self.list_base)
+        points_layout.addWidget(QtWidgets.QLabel("叶尖 (T1)"))
+        points_layout.addWidget(self.list_tip)
+        points_layout.addWidget(QtWidgets.QLabel("叶长控制点 (C1..Cn)"))
+        points_layout.addWidget(self.list_ctrl)
+        points_layout.addWidget(QtWidgets.QLabel("叶宽端点 (W1/W2)"))
+        points_layout.addWidget(self.list_width)
+        points_layout.addWidget(QtWidgets.QLabel("叶宽控制点 (WC1..WCn)"))
+        points_layout.addWidget(self.list_width_ctrl)
+        panel.addWidget(points_group)
 
-        panel.addWidget(QtWidgets.QLabel("叶基 (B1)"))
-        panel.addWidget(self.list_base)
-        self.btn_del_base = QtWidgets.QPushButton("删除选中的叶基")
-        panel.addWidget(self.btn_del_base)
-
-        panel.addWidget(QtWidgets.QLabel("叶尖 (T1)"))
-        panel.addWidget(self.list_tip)
-        self.btn_del_tip = QtWidgets.QPushButton("删除选中的叶尖")
-        panel.addWidget(self.btn_del_tip)
-
-        panel.addWidget(QtWidgets.QLabel("控制点 (C1..Cn)"))
-        panel.addWidget(self.list_ctrl)
-        self.btn_del_ctrl = QtWidgets.QPushButton("删除选中的控制点")
-        panel.addWidget(self.btn_del_ctrl)
-
-        panel.addWidget(QtWidgets.QLabel("叶宽点 (W1/W2)"))
-        panel.addWidget(self.list_width)
-        self.btn_del_width = QtWidgets.QPushButton("删除选中的叶宽点")
-        panel.addWidget(self.btn_del_width)
-
-        panel.addSpacing(6)
-
-        self.btn_clear_ctrl = QtWidgets.QPushButton("清空控制点（已保存）")
-        self.btn_compute = QtWidgets.QPushButton("计算并保存（叶长 + 叶宽路径）")
-        self.btn_export = QtWidgets.QPushButton("导出整株标注 JSON（所有已标注实例）")
-        panel.addWidget(self.btn_clear_ctrl)
-        panel.addWidget(self.btn_compute)
-        panel.addWidget(self.btn_export)
-
-        panel.addSpacing(10)
-        self.info = QtWidgets.QLabel("状态：未加载")
-        self.info.setWordWrap(True)
-        panel.addWidget(self.info)
         panel.addStretch(1)
 
         # ---------- right: PyVista ----------
@@ -227,30 +269,58 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         self.btn_back_browse.clicked.connect(self.on_back_browse)
         self.combo_inst.currentIndexChanged.connect(self.on_inst_changed)
 
+        self.list_ctrl.customContextMenuRequested.connect(self.on_ctrl_context_menu)
+        self.list_width_ctrl.customContextMenuRequested.connect(self.on_width_ctrl_context_menu)
+
         self.btn_toggle_base.toggled.connect(self.on_toggle_base)
         self.btn_toggle_tip.toggled.connect(self.on_toggle_tip)
         self.btn_toggle_ctrl.toggled.connect(self.on_toggle_ctrl)
         self.btn_toggle_width.toggled.connect(self.on_toggle_width)
+        self.btn_toggle_width_ctrl.toggled.connect(self.on_toggle_width_ctrl)
 
         self.btn_recommend_length.clicked.connect(self.on_recommend_length)
         self.btn_generate_length.clicked.connect(self.on_generate_length)
 
-        self.btn_del_base.clicked.connect(self.on_delete_base)
-        self.btn_del_tip.clicked.connect(self.on_delete_tip)
-        self.btn_del_ctrl.clicked.connect(self.on_delete_ctrl)
-        self.btn_del_width.clicked.connect(self.on_delete_width)
+        self.btn_delete.clicked.connect(self.on_delete_selected)
+        self.btn_rename_ctrl.clicked.connect(self.on_rename_ctrl)
+        self.btn_rename_width_ctrl.clicked.connect(self.on_rename_width_ctrl)
 
         self.btn_recommend_width.clicked.connect(self.on_recommend_width)  # ✅
 
-        self.btn_clear_ctrl.clicked.connect(self.on_clear_ctrl)
         self.btn_compute.clicked.connect(self.on_compute)
-        self.btn_export.clicked.connect(self.on_export_all)
+        self.btn_export.clicked.connect(self.on_save_annotations)
+
+        self.act_load.triggered.connect(self.on_load)
+        self.act_export_dir.triggered.connect(self.on_choose_export_dir)
+        self.act_quit.triggered.connect(self.close)
+        self.act_help.triggered.connect(self.on_show_help)
+
+        self.act_view_rgb.triggered.connect(lambda: self._set_view_mode("RGB"))
+        self.act_view_sem.triggered.connect(lambda: self._set_view_mode("语义"))
+        self.act_view_inst.triggered.connect(lambda: self._set_view_mode("实例"))
+        self.act_select_inst.triggered.connect(self.on_select_instance_menu)
+        self.act_start_anno.triggered.connect(self.on_start_annotation)
+        self.act_back_browse.triggered.connect(self.on_back_browse)
+
+        self.act_pick_base.toggled.connect(self.btn_toggle_base.setChecked)
+        self.act_pick_tip.toggled.connect(self.btn_toggle_tip.setChecked)
+        self.act_pick_ctrl.toggled.connect(self.btn_toggle_ctrl.setChecked)
+        self.act_pick_width.toggled.connect(self.btn_toggle_width.setChecked)
+        self.act_pick_width_ctrl.toggled.connect(self.btn_toggle_width_ctrl.setChecked)
+
+        self.act_recommend_length.triggered.connect(self.on_recommend_length)
+        self.act_generate_length.triggered.connect(self.on_generate_length)
+        self.act_recommend_width.triggered.connect(self.on_recommend_width)
+        self.act_compute.triggered.connect(self.on_compute)
+        self.act_export_labeled.triggered.connect(self.on_export_labeled_cloud)
+        self.act_save_labels.triggered.connect(self.on_save_annotations)
 
         self._install_vtk_pick_observer()
 
         self._update_buttons()
         self._update_status("提示：标注模式用 Shift+左键 选点。")
         self._refresh_point_lists()
+        self._sync_pick_actions()
 
     # ----------------------------
     # status
@@ -284,15 +354,33 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         for b in [
             self.btn_toggle_base, self.btn_toggle_tip, self.btn_toggle_ctrl, self.btn_toggle_width,
             self.btn_recommend_length, self.btn_generate_length,
-            self.btn_recommend_width,  # ✅
-            self.btn_del_base, self.btn_del_tip, self.btn_del_ctrl, self.btn_del_width,
-            self.btn_clear_ctrl, self.btn_compute
+            self.btn_recommend_width,
+            self.btn_delete, self.btn_rename_ctrl,
+            self.btn_toggle_width_ctrl, self.btn_rename_width_ctrl,
+            self.btn_compute,
         ]:
             b.setEnabled(in_anno)
 
-        self.btn_export.setEnabled(self.session.cloud is not None and self.session.get_annotations_count() > 0)
+        can_export = self.session.cloud is not None and self.session.get_annotations_count() > 0
+        self.btn_export.setEnabled(can_export)
         self.btn_back_browse.setEnabled(self.session.cloud is not None)
         self.btn_start_anno.setEnabled(self.session.cloud is not None and self.combo_inst.count() > 0)
+
+        self.act_export_dir.setEnabled(True)
+        self.act_back_browse.setEnabled(self.session.cloud is not None)
+        self.act_start_anno.setEnabled(self.session.cloud is not None and self.combo_inst.count() > 0)
+        self.act_select_inst.setEnabled(self.session.cloud is not None and self.combo_inst.count() > 0)
+        for a in [self.act_view_rgb, self.act_view_sem, self.act_view_inst, self.act_view_label]:
+            a.setEnabled(self.session.cloud is not None)
+
+        self.act_save_labels.setEnabled(can_export)
+        for a in [
+            self.act_pick_base, self.act_pick_tip, self.act_pick_ctrl,
+            self.act_pick_width, self.act_pick_width_ctrl,
+            self.act_recommend_length, self.act_generate_length,
+            self.act_recommend_width, self.act_compute, self.act_export_labeled, self.act_save_labels,
+        ]:
+            a.setEnabled(in_anno)
 
     # ----------------------------
     # vtk picking (Shift+Left Click)
@@ -392,10 +480,15 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         mode = self.combo_view.currentText()
         if mode == "RGB" and self.session.has_rgb():
             poly["rgb"] = self.session.get_full_rgb()
-        elif mode == "Semantic":
+        elif mode == "语义":
             poly["rgb"] = colors_from_labels(self.session.get_full_sem())
-        elif mode == "Instance":
+        elif mode == "实例":
             poly["rgb"] = colors_from_labels(self.session.get_full_inst())
+        elif mode == "标签" and self.session.point_labels is not None and self.session.leaf_global_idx is not None:
+            full_labels = np.zeros((len(xyz),), dtype=np.int64)
+            if len(self.session.point_labels) == len(self.session.leaf_global_idx):
+                full_labels[self.session.leaf_global_idx] = self.session.point_labels
+            poly["rgb"] = colors_from_labels(full_labels)
         else:
             poly["rgb"] = np.full((len(xyz), 3), 180, dtype=np.uint8)
         return poly
@@ -417,8 +510,8 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         )
 
         for nm in [
-            self.A_BASE_SAVED, self.A_TIP_SAVED, self.A_CTRL_SAVED, self.A_WIDTH_SAVED,
-            self.A_BASE_TEMP, self.A_TIP_TEMP, self.A_CTRL_TEMP, self.A_WIDTH_TEMP,
+            self.A_BASE_SAVED, self.A_TIP_SAVED, self.A_CTRL_SAVED, self.A_WIDTH_SAVED, self.A_WIDTH_CTRL_SAVED,
+            self.A_BASE_TEMP, self.A_TIP_TEMP, self.A_CTRL_TEMP, self.A_WIDTH_TEMP, self.A_WIDTH_CTRL_TEMP,
             self.A_LABELS_SAVED, self.A_LABELS_TEMP,
             self.A_LINE_CENTER_CUR, self.A_LINE_WIDTH_CUR,
             self.A_LINE_CENTER_CACHED, self.A_LINE_WIDTH_CACHED
@@ -437,8 +530,16 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         self._remove_actor(self.A_CLOUD_INST)
 
         poly = pv.PolyData(ds)
+        if self.combo_view.currentText() == "标签" and self.session.point_labels is not None:
+            src_idx = self.session.ds.src_indices.astype(np.int64)
+            if len(self.session.point_labels) >= np.max(src_idx) + 1:
+                ds_labels = self.session.point_labels[src_idx]
+                poly["rgb"] = colors_from_labels(ds_labels)
+
         self._actor_cloud_inst = self.plotter.add_mesh(
             poly, name=self.A_CLOUD_INST,
+            scalars="rgb" if "rgb" in poly.array_names else None,
+            rgb="rgb" in poly.array_names,
             color=(0.7, 0.7, 0.7),
             render_points_as_spheres=True, point_size=5
         )
@@ -526,7 +627,7 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
             return
 
         try:
-            self.session.compute_centerline(use_ctrl=False)
+            self.session.compute_centerline_polyline(use_ctrl=False)
             self._update_lines()
             self.plotter.render()
             L = self.session.centerline_result.length if self.session.centerline_result else None
@@ -549,7 +650,7 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
             return
 
         try:
-            self.session.compute_centerline(use_ctrl=True)
+            self.session.compute_centerline_polyline(use_ctrl=True)
             self._update_lines()
             self.plotter.render()
             L = self.session.centerline_result.length if self.session.centerline_result else None
@@ -593,6 +694,12 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         else:
             self._remove_actor(self.A_WIDTH_SAVED)
 
+        if len(self.session.width_ctrl_indices) > 0:
+            pts = ds[np.array(self.session.width_ctrl_indices, dtype=int)]
+            self._add_points_actor(self.A_WIDTH_CTRL_SAVED, pts, "cyan", 12)
+        else:
+            self._remove_actor(self.A_WIDTH_CTRL_SAVED)
+
     def _update_markers_temp(self):
         if self.session.ds is None:
             return
@@ -626,6 +733,12 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         else:
             self._remove_actor(self.A_WIDTH_TEMP)
 
+        if len(self.temp_width_ctrl_indices) > 0:
+            pts = ds[np.array(self.temp_width_ctrl_indices, dtype=int)]
+            self._add_points_actor(self.A_WIDTH_CTRL_TEMP, pts, "cyan", 12)
+        else:
+            self._remove_actor(self.A_WIDTH_CTRL_TEMP)
+
     def _update_labels_saved(self):
         if self.session.ds is None:
             self._remove_actor(self.A_LABELS_SAVED)
@@ -643,9 +756,9 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
             pts.append(ds[int(self.session.tip_idx)])
             labels.append("T1")
 
-        for i, idx in enumerate(self.session.ctrl_indices, start=1):
+        for idx, cid in zip(self.session.ctrl_indices, self.session.ctrl_ids):
             pts.append(ds[int(idx)])
-            labels.append(f"C{i}")
+            labels.append(f"C{cid}")
 
         if getattr(self.session, "width_w1_idx", None) is not None:
             pts.append(ds[int(self.session.width_w1_idx)])
@@ -653,6 +766,10 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         if getattr(self.session, "width_w2_idx", None) is not None:
             pts.append(ds[int(self.session.width_w2_idx)])
             labels.append("W2")
+
+        for idx, cid in zip(self.session.width_ctrl_indices, self.session.width_ctrl_ids):
+            pts.append(ds[int(idx)])
+            labels.append(f"WC{cid}")
 
         if len(pts) > 0:
             self._add_labels_actor(self.A_LABELS_SAVED, np.asarray(pts), labels)
@@ -683,6 +800,10 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         if self.temp_w2_idx is not None:
             pts.append(ds[int(self.temp_w2_idx)])
             labels.append("W2*")
+
+        for i, idx in enumerate(self.temp_width_ctrl_indices, start=1):
+            pts.append(ds[int(idx)])
+            labels.append(f"WC*{i}")
 
         if len(pts) > 0:
             self._add_labels_actor(self.A_LABELS_TEMP, np.asarray(pts), labels)
@@ -737,6 +858,7 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         self.list_tip.clear()
         self.list_ctrl.clear()
         self.list_width.clear()
+        self.list_width_ctrl.clear()
 
         if self.session.base_idx is not None:
             it = QListWidgetItem("B1")
@@ -748,9 +870,11 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
             it.setData(0x0100, ("tip", 0))
             self.list_tip.addItem(it)
 
-        for i, _ in enumerate(self.session.ctrl_indices, start=1):
-            it = QListWidgetItem(f"C{i}")
-            it.setData(0x0100, ("ctrl", i - 1))
+        pairs = list(zip(self.session.ctrl_ids, self.session.ctrl_indices, range(len(self.session.ctrl_indices))))
+        pairs.sort(key=lambda x: x[0])
+        for cid, idx, orig_idx in pairs:
+            it = QListWidgetItem(f"C{cid}")
+            it.setData(0x0100, ("ctrl", orig_idx))
             self.list_ctrl.addItem(it)
 
         if getattr(self.session, "width_w1_idx", None) is not None:
@@ -761,6 +885,13 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
             it = QListWidgetItem("W2")
             it.setData(0x0100, ("w", 2))
             self.list_width.addItem(it)
+
+        wpairs = list(zip(self.session.width_ctrl_ids, self.session.width_ctrl_indices, range(len(self.session.width_ctrl_indices))))
+        wpairs.sort(key=lambda x: x[0])
+        for cid, idx, orig_idx in wpairs:
+            it = QListWidgetItem(f"WC{cid}")
+            it.setData(0x0100, ("wctrl", orig_idx))
+            self.list_width_ctrl.addItem(it)
 
     def _invalidate_results_after_point_change(self):
         self.session.centerline_result = None
@@ -791,6 +922,9 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
             self.temp_w1_idx = None
             self.temp_w2_idx = None
             self.btn_toggle_width.setText("叶宽点选择：开启 (W1/W2)")
+        elif mode == self.MODE_WIDTH_CTRL:
+            self.temp_width_ctrl_indices = []
+            self.btn_toggle_width_ctrl.setText("叶宽控制点选择：开启")
 
         self._update_markers_temp()
         self._update_labels_temp()
@@ -798,6 +932,8 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
 
         if mode == self.MODE_WIDTH:
             self._update_status("叶宽点选择：Shift+左键依次选择 W1/W2；关闭后保存。")
+        elif mode == self.MODE_WIDTH_CTRL:
+            self._update_status("叶宽控制点：Shift+左键添加；关闭后保存。")
         else:
             self._update_status("提示：Shift+左键选点；再次点击按钮关闭并保存。")
 
@@ -814,6 +950,8 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
                     self.session.width_w1_idx = int(self.temp_w1_idx)
                 if self.temp_w2_idx is not None:
                     self.session.width_w2_idx = int(self.temp_w2_idx)
+            if self.pick_mode == self.MODE_WIDTH_CTRL and len(self.temp_width_ctrl_indices) > 0:
+                self.session.extend_width_ctrl(self.temp_width_ctrl_indices)
 
         if self.pick_mode == self.MODE_BASE:
             self.temp_base_idx = None
@@ -824,10 +962,12 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         elif self.pick_mode == self.MODE_WIDTH:
             self.temp_w1_idx = None
             self.temp_w2_idx = None
+        elif self.pick_mode == self.MODE_WIDTH_CTRL:
+            self.temp_width_ctrl_indices = []
 
         self.pick_mode = self.MODE_NONE
 
-        for b in [self.btn_toggle_base, self.btn_toggle_tip, self.btn_toggle_ctrl, self.btn_toggle_width]:
+        for b in [self.btn_toggle_base, self.btn_toggle_tip, self.btn_toggle_ctrl, self.btn_toggle_width, self.btn_toggle_width_ctrl]:
             b.blockSignals(True)
             b.setChecked(False)
             b.blockSignals(False)
@@ -836,6 +976,7 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         self.btn_toggle_tip.setText("叶尖选择：关闭")
         self.btn_toggle_ctrl.setText("控制点选择：关闭")
         self.btn_toggle_width.setText("叶宽点选择：关闭 (W1/W2)")
+        self.btn_toggle_width_ctrl.setText("叶宽控制点选择：关闭")
 
         self._update_markers_saved()
         self._update_markers_temp()
@@ -845,6 +986,7 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         self.plotter.render()
 
         self._refresh_point_lists()
+        self._sync_pick_actions()
 
     # ----------------------------
     # toggle slots
@@ -861,6 +1003,7 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
                 self._invalidate_results_after_point_change()
                 self._maybe_recommend_width_and_refresh()
                 self._update_status("叶基选择关闭：叶基点已保存并保留显示。")
+        self._sync_pick_actions()
 
     def on_toggle_tip(self, checked: bool):
         if not self.annotating:
@@ -874,6 +1017,7 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
                 self._invalidate_results_after_point_change()
                 self._maybe_recommend_width_and_refresh()
                 self._update_status("叶尖选择关闭：叶尖点已保存并保留显示。")
+        self._sync_pick_actions()
 
     def on_toggle_ctrl(self, checked: bool):
         if not self.annotating:
@@ -887,6 +1031,7 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
                 self._invalidate_results_after_point_change()
                 self._maybe_recommend_width_and_refresh()
                 self._update_status("控制点选择关闭：控制点已保存并保留显示。")
+        self._sync_pick_actions()
 
     def on_toggle_width(self, checked: bool):
         if not self.annotating:
@@ -899,6 +1044,20 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
                 self._exit_current_mode(commit=True)
                 self._invalidate_results_after_point_change()
                 self._update_status("叶宽点选择关闭：W1/W2 已保存并保留显示。")
+        self._sync_pick_actions()
+
+    def on_toggle_width_ctrl(self, checked: bool):
+        if not self.annotating:
+            return
+        if checked:
+            self._close_other_toggles(except_mode=self.MODE_WIDTH_CTRL)
+            self._enter_mode(self.MODE_WIDTH_CTRL)
+        else:
+            if self.pick_mode == self.MODE_WIDTH_CTRL:
+                self._exit_current_mode(commit=True)
+                self._invalidate_results_after_point_change()
+                self._update_status("叶宽控制点选择关闭：已保存。")
+        self._sync_pick_actions()
 
     def _close_other_toggles(self, except_mode: str):
         mapping = {
@@ -906,6 +1065,7 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
             self.MODE_TIP: self.btn_toggle_tip,
             self.MODE_CTRL: self.btn_toggle_ctrl,
             self.MODE_WIDTH: self.btn_toggle_width,
+            self.MODE_WIDTH_CTRL: self.btn_toggle_width_ctrl,
         }
         for mode, btn in mapping.items():
             if mode == except_mode:
@@ -939,6 +1099,8 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
                 self.temp_w2_idx = idx
             else:
                 self.temp_w2_idx = idx
+        elif self.pick_mode == self.MODE_WIDTH_CTRL:
+            self.temp_width_ctrl_indices.append(idx)
 
         self._update_markers_temp()
         self._update_labels_temp()
@@ -947,6 +1109,52 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
     # ----------------------------
     # delete actions
     # ----------------------------
+    def on_ctrl_context_menu(self, pos):
+        it = self.list_ctrl.itemAt(pos)
+        if it is None:
+            return
+        self.list_ctrl.setCurrentItem(it)
+        menu = QtWidgets.QMenu(self)
+        act_delete = menu.addAction("删除")
+        act_rename = menu.addAction("修改顺序")
+        action = menu.exec_(self.list_ctrl.mapToGlobal(pos))
+        if action == act_delete:
+            self.on_delete_ctrl()
+        elif action == act_rename:
+            self.on_rename_ctrl()
+
+    def on_width_ctrl_context_menu(self, pos):
+        it = self.list_width_ctrl.itemAt(pos)
+        if it is None:
+            return
+        self.list_width_ctrl.setCurrentItem(it)
+        menu = QtWidgets.QMenu(self)
+        act_delete = menu.addAction("删除")
+        act_rename = menu.addAction("修改顺序")
+        action = menu.exec_(self.list_width_ctrl.mapToGlobal(pos))
+        if action == act_delete:
+            self.on_delete_width_ctrl()
+        elif action == act_rename:
+            self.on_rename_width_ctrl()
+
+    def on_delete_selected(self):
+        if self.list_base.currentItem() is not None:
+            self.on_delete_base()
+            return
+        if self.list_tip.currentItem() is not None:
+            self.on_delete_tip()
+            return
+        if self.list_ctrl.currentItem() is not None:
+            self.on_delete_ctrl()
+            return
+        if self.list_width.currentItem() is not None:
+            self.on_delete_width()
+            return
+        if self.list_width_ctrl.currentItem() is not None:
+            self.on_delete_width_ctrl()
+            return
+        QMessageBox.information(self, "提示", "请先在左侧列表中选择要删除的标记。")
+
     def on_delete_base(self):
         if self.session.base_idx is None:
             return
@@ -979,6 +1187,8 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         idx_in_list = int(info[1])
         if 0 <= idx_in_list < len(self.session.ctrl_indices):
             self.session.ctrl_indices.pop(idx_in_list)
+            if idx_in_list < len(self.session.ctrl_ids):
+                self.session.ctrl_ids.pop(idx_in_list)
 
         self._invalidate_results_after_point_change()
         self._update_markers_saved()
@@ -987,6 +1197,93 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         self._refresh_point_lists()
         self._maybe_recommend_width_and_refresh()
         self._update_status("已删除选中的控制点。")
+
+    def on_rename_ctrl(self):
+        it = self.list_ctrl.currentItem()
+        if it is None:
+            return
+        info = it.data(0x0100)
+        if not info or info[0] != "ctrl":
+            return
+        idx_in_list = int(info[1])
+        if idx_in_list >= len(self.session.ctrl_ids):
+            return
+
+        cur_id = self.session.ctrl_ids[idx_in_list]
+        new_id, ok = QtWidgets.QInputDialog.getInt(
+            self, "重命名叶长控制点",
+            "输入新的编号（正整数）",
+            value=int(cur_id), min=1, max=100000
+        )
+        if not ok:
+            return
+        new_id = int(new_id)
+        if new_id in self.session.ctrl_ids and new_id != cur_id:
+            QMessageBox.information(self, "提示", "编号已存在，请选择其他编号。")
+            return
+
+        self.session.ctrl_ids[idx_in_list] = new_id
+
+        self._invalidate_results_after_point_change()
+        self._update_markers_saved()
+        self._update_labels_saved()
+        self.plotter.render()
+        self._refresh_point_lists()
+        self._maybe_recommend_width_and_refresh()
+        self._update_status("已修改叶长控制点编号。")
+
+    def on_delete_width_ctrl(self):
+        it = self.list_width_ctrl.currentItem()
+        if it is None:
+            return
+        info = it.data(0x0100)
+        if not info or info[0] != "wctrl":
+            return
+        idx_in_list = int(info[1])
+        if 0 <= idx_in_list < len(self.session.width_ctrl_indices):
+            self.session.width_ctrl_indices.pop(idx_in_list)
+            if idx_in_list < len(self.session.width_ctrl_ids):
+                self.session.width_ctrl_ids.pop(idx_in_list)
+
+        self._invalidate_results_after_point_change()
+        self._update_markers_saved()
+        self._update_labels_saved()
+        self.plotter.render()
+        self._refresh_point_lists()
+        self._update_status("已删除选中的叶宽控制点。")
+
+    def on_rename_width_ctrl(self):
+        it = self.list_width_ctrl.currentItem()
+        if it is None:
+            return
+        info = it.data(0x0100)
+        if not info or info[0] != "wctrl":
+            return
+        idx_in_list = int(info[1])
+        if idx_in_list >= len(self.session.width_ctrl_ids):
+            return
+
+        cur_id = self.session.width_ctrl_ids[idx_in_list]
+        new_id, ok = QtWidgets.QInputDialog.getInt(
+            self, "重命名叶宽控制点",
+            "输入新的编号（正整数）",
+            value=int(cur_id), min=1, max=100000
+        )
+        if not ok:
+            return
+        new_id = int(new_id)
+        if new_id in self.session.width_ctrl_ids and new_id != cur_id:
+            QMessageBox.information(self, "提示", "编号已存在，请选择其他编号。")
+            return
+
+        self.session.width_ctrl_ids[idx_in_list] = new_id
+
+        self._invalidate_results_after_point_change()
+        self._update_markers_saved()
+        self._update_labels_saved()
+        self.plotter.render()
+        self._refresh_point_lists()
+        self._update_status("已修改叶宽控制点编号。")
 
     def on_delete_width(self):
         it = self.list_width.currentItem()
@@ -1023,23 +1320,89 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
             return
         if not self.annotating:
             self._show_browse_scene()
+        else:
+            self._show_annotate_scene()
+        mode = self.combo_view.currentText()
+        if mode == "RGB":
+            self.act_view_rgb.setChecked(True)
+        elif mode == "语义":
+            self.act_view_sem.setChecked(True)
+        elif mode == "实例":
+            self.act_view_inst.setChecked(True)
+        elif mode == "标签":
+            self.act_view_label.setChecked(True)
+
+    def _set_view_mode(self, mode: str):
+        self.combo_view.setCurrentText(mode)
+        self.on_view_mode_changed()
+
+    def on_select_instance_menu(self):
+        if self.session.cloud is None or self.combo_inst.count() == 0:
+            QMessageBox.information(self, "提示", "当前没有可选实例。")
+            return
+        items = [self.combo_inst.itemText(i) for i in range(self.combo_inst.count())]
+        cur = self.combo_inst.currentText()
+        cur_idx = items.index(cur) if cur in items else 0
+        item, ok = QtWidgets.QInputDialog.getItem(self, "选择实例", "实例 id：", items, cur_idx, False)
+        if not ok or not item:
+            return
+        self.combo_inst.setCurrentText(item)
+        self.on_inst_changed()
+
+    def on_choose_export_dir(self):
+        export_dir = QFileDialog.getExistingDirectory(
+            self, "选择标注导出目录", self._settings.value("export_dir", self._settings.value("last_dir", "", type=str), type=str)
+        )
+        if export_dir:
+            self._settings.setValue("export_dir", export_dir)
+            self._update_status(f"已设置导出目录：{export_dir}")
+
+    def _sync_pick_actions(self):
+        self.act_pick_base.setChecked(self.btn_toggle_base.isChecked())
+        self.act_pick_tip.setChecked(self.btn_toggle_tip.isChecked())
+        self.act_pick_ctrl.setChecked(self.btn_toggle_ctrl.isChecked())
+        self.act_pick_width.setChecked(self.btn_toggle_width.isChecked())
+        self.act_pick_width_ctrl.setChecked(self.btn_toggle_width_ctrl.isChecked())
 
     # ----------------------------
     # UI actions
     # ----------------------------
     def on_load(self):
+        last_dir = self._settings.value("last_dir", "", type=str)
         path, _ = QFileDialog.getOpenFileName(
-            self, "选择整株点云文件", "",
+            self, "选择整株点云文件", last_dir,
             "PointCloud (*.xyz *.txt *.csv *.npy *.ply *.pcd *.vtk *.vtp);;All (*.*)"
         )
         if not path:
             return
+        self._settings.setValue("last_dir", os.path.dirname(path))
 
         try:
             self.session.load(path)
         except Exception as e:
             QMessageBox.critical(self, "读取失败", str(e))
             return
+
+        export_dir = QFileDialog.getExistingDirectory(
+            self, "选择标注导出目录", self._settings.value("export_dir", os.path.dirname(path), type=str)
+        )
+        if export_dir:
+            self._settings.setValue("export_dir", export_dir)
+
+        base = os.path.splitext(os.path.basename(path))[0]
+        data_dir = os.path.dirname(path)
+        export_dir = self._settings.value("export_dir", "", type=str)
+        cand_paths = [os.path.join(data_dir, f"{base}.json")]
+        if export_dir:
+            cand_paths.append(os.path.join(export_dir, f"{base}.json"))
+        for ap in cand_paths:
+            if os.path.isfile(ap):
+                try:
+                    self.session.load_annotations_json(ap)
+                    self._update_status(f"已自动导入标注：{os.path.basename(ap)}")
+                except Exception:
+                    pass
+                break
 
         self.combo_inst.blockSignals(True)
         self.combo_inst.clear()
@@ -1055,6 +1418,7 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         self.temp_ctrl_indices = []
         self.temp_w1_idx = None
         self.temp_w2_idx = None
+        self.temp_width_ctrl_indices = []
 
         self._update_buttons()
         self._show_browse_scene()
@@ -1121,6 +1485,7 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
             self.temp_ctrl_indices = []
             self.temp_w1_idx = None
             self.temp_w2_idx = None
+            self.temp_width_ctrl_indices = []
 
             self.session.centerline_result = None
             self.session.width_path_points = None
@@ -1183,11 +1548,17 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
             QMessageBox.information(self, "提示", "当前文件还没有任何实例被标注。")
             return
 
-        out_path, _ = QFileDialog.getSaveFileName(
-            self, "导出整株标注 JSON", "plant_annotations.json", "JSON (*.json)"
-        )
-        if not out_path:
-            return
+        export_dir = self._settings.value("export_dir", "", type=str)
+        if not export_dir:
+            export_dir = QFileDialog.getExistingDirectory(self, "选择标注导出目录", self._settings.value("last_dir", "", type=str))
+            if not export_dir:
+                return
+            self._settings.setValue("export_dir", export_dir)
+
+        base = "plant_annotations"
+        if self.session.file_path:
+            base = os.path.splitext(os.path.basename(self.session.file_path))[0]
+        out_path = os.path.join(export_dir, f"{base}.json")
 
         try:
             self.session.export_all_json(out_path)
@@ -1198,3 +1569,66 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         QMessageBox.information(self, "完成", f"已导出：{out_path}")
         self._update_buttons()
         self._update_status(f"已导出整株标注：{os.path.basename(out_path)}")
+
+    def on_export_labeled_cloud(self):
+        if self.session.point_labels is None:
+            radius, ok = QtWidgets.QInputDialog.getDouble(
+                self, "????", "?????", value=float(self.session.params.label_radius),
+                min=0.0, max=1000.0, decimals=6
+            )
+            if not ok:
+                return
+            self.session.params.label_radius = float(radius)
+            self.session.point_labels = self.session.compute_point_labels(self.session.params.label_radius)
+            if self.session.point_labels is None:
+                QMessageBox.information(self, "提示", "当前实例没有点标签，请先计算叶长/叶宽。")
+                return
+        self._set_view_mode("标签")
+        if self.annotating:
+            self._show_annotate_scene()
+        else:
+            self._show_browse_scene()
+        QMessageBox.information(self, "完成", "已生成标签并更新视图。")
+
+    def on_save_annotations(self):
+        if self.session.get_annotations_count() == 0:
+            QMessageBox.information(self, "提示", "当前文件还没有任何实例被标注。")
+            return
+        if self.session.point_labels is None:
+            radius, ok = QtWidgets.QInputDialog.getDouble(
+                self, "????", "?????", value=float(self.session.params.label_radius),
+                min=0.0, max=1000.0, decimals=6
+            )
+            if not ok:
+                return
+            self.session.params.label_radius = float(radius)
+            self.session.point_labels = self.session.compute_point_labels(self.session.params.label_radius)
+        export_dir = self._settings.value("export_dir", "", type=str)
+        if not export_dir:
+            export_dir = QFileDialog.getExistingDirectory(self, "选择标注导出目录", self._settings.value("last_dir", "", type=str))
+            if not export_dir:
+                return
+            self._settings.setValue("export_dir", export_dir)
+
+        base = "plant_annotations"
+        if self.session.file_path:
+            base = os.path.splitext(os.path.basename(self.session.file_path))[0]
+        json_path = os.path.join(export_dir, f"{base}.json")
+        label_path = os.path.join(export_dir, f"{base}_labels.txt")
+        try:
+            self.session.export_all_json(json_path)
+            self.session.export_labeled_point_cloud(label_path)
+        except Exception as e:
+            QMessageBox.critical(self, "导出失败", str(e))
+            return
+
+        QMessageBox.information(self, "完成", f"已保存标注：{json_path}\n已保存标签：{label_path}")
+
+    def on_show_help(self):
+        QMessageBox.information(
+            self,
+            "快捷键/说明",
+            "拾取：Shift + 左键\n"
+            "切换：先开启对应拾取模式再点击点云\n"
+            "叶宽：W1/W2 为端点，WC 为叶宽控制点",
+        )
