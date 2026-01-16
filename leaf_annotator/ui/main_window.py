@@ -139,6 +139,7 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         self.act_recommend_length = calc_menu.addAction("推荐叶长")
         self.act_generate_length = calc_menu.addAction("生成叶长")
         self.act_recommend_width = calc_menu.addAction("推荐叶宽")
+        self.act_generate_width = calc_menu.addAction("生成叶宽")
         calc_menu.addSeparator()
         self.act_compute = calc_menu.addAction("计算")
         self.act_export_labeled = calc_menu.addAction("生成标记点云")
@@ -205,6 +206,7 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         self.btn_recommend_length = QtWidgets.QPushButton("推荐叶长（B1→T1）")
         self.btn_generate_length = QtWidgets.QPushButton("生成叶长（B1 + 控制点 + T1）")
         self.btn_recommend_width = QtWidgets.QPushButton("推荐叶宽（沿当前叶长）")
+        self.btn_generate_width = QtWidgets.QPushButton("生成叶宽（W1→W2）")
 
         self.btn_delete = QtWidgets.QPushButton("删除选中标记")
         self.btn_rename_ctrl = QtWidgets.QPushButton("重命名叶长控制点顺序 (C#)")
@@ -286,6 +288,7 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         self.btn_rename_width_ctrl.clicked.connect(self.on_rename_width_ctrl)
 
         self.btn_recommend_width.clicked.connect(self.on_recommend_width)  # ✅
+        self.btn_generate_width.clicked.connect(self.on_generate_width)
 
         self.btn_compute.clicked.connect(self.on_compute)
         self.btn_export.clicked.connect(self.on_save_annotations)
@@ -311,6 +314,7 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         self.act_recommend_length.triggered.connect(self.on_recommend_length)
         self.act_generate_length.triggered.connect(self.on_generate_length)
         self.act_recommend_width.triggered.connect(self.on_recommend_width)
+        self.act_generate_width.triggered.connect(self.on_generate_width)
         self.act_compute.triggered.connect(self.on_compute)
         self.act_export_labeled.triggered.connect(self.on_export_labeled_cloud)
         self.act_save_labels.triggered.connect(self.on_save_annotations)
@@ -354,7 +358,7 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         for b in [
             self.btn_toggle_base, self.btn_toggle_tip, self.btn_toggle_ctrl, self.btn_toggle_width,
             self.btn_recommend_length, self.btn_generate_length,
-            self.btn_recommend_width,
+            self.btn_recommend_width, self.btn_generate_width,
             self.btn_delete, self.btn_rename_ctrl,
             self.btn_toggle_width_ctrl, self.btn_rename_width_ctrl,
             self.btn_compute,
@@ -378,7 +382,8 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
             self.act_pick_base, self.act_pick_tip, self.act_pick_ctrl,
             self.act_pick_width, self.act_pick_width_ctrl,
             self.act_recommend_length, self.act_generate_length,
-            self.act_recommend_width, self.act_compute, self.act_export_labeled, self.act_save_labels,
+            self.act_recommend_width, self.act_generate_width,
+            self.act_compute, self.act_export_labeled, self.act_save_labels,
         ]:
             a.setEnabled(in_anno)
 
@@ -485,7 +490,7 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         elif mode == "实例":
             poly["rgb"] = colors_from_labels(self.session.get_full_inst())
         elif mode == "标签" and self.session.point_labels is not None and self.session.leaf_global_idx is not None:
-            full_labels = np.zeros((len(xyz),), dtype=np.int64)
+            full_labels = np.full((len(xyz),), -1, dtype=np.int64)
             if len(self.session.point_labels) == len(self.session.leaf_global_idx):
                 full_labels[self.session.leaf_global_idx] = self.session.point_labels
             poly["rgb"] = colors_from_labels(full_labels)
@@ -612,6 +617,32 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "推荐失败", str(e))
 
+    def on_generate_width(self):
+        """
+        生成叶宽：基于 W1/W2（可选控制点）生成最短路径并显示绿线。
+        """
+        if not self.annotating:
+            return
+
+        if self.pick_mode != self.MODE_NONE:
+            self._exit_current_mode(commit=True)
+
+        if getattr(self.session, "width_w1_idx", None) is None or getattr(self.session, "width_w2_idx", None) is None:
+            QMessageBox.information(self, "提示", "请先选择叶宽端点 W1/W2。")
+            return
+
+        try:
+            self.session.compute_width_path()
+            self._update_lines()
+            self.plotter.render()
+            wlen = getattr(self.session, "width_path_length", None)
+            if wlen is None:
+                self._update_status("叶宽路径生成完成。")
+            else:
+                self._update_status(f"叶宽路径生成完成：长度={wlen:.6f}")
+        except Exception as e:
+            QMessageBox.critical(self, "生成叶宽失败", str(e))
+
     def on_recommend_length(self):
         """
         推荐叶长：仅用 B1/T1，在 kNN 图上求最短路径并显示红线。
@@ -627,7 +658,7 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
             return
 
         try:
-            self.session.compute_centerline_polyline(use_ctrl=False)
+            self.session.compute_centerline(use_ctrl=False)
             self._update_lines()
             self.plotter.render()
             L = self.session.centerline_result.length if self.session.centerline_result else None
@@ -1316,25 +1347,31 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
     # view mode changed (browse only)
     # ----------------------------
     def on_view_mode_changed(self):
+        self._refresh_scene()
+
+    def _set_view_mode(self, mode: str):
+        self._refresh_scene(mode=mode)
+
+    def _refresh_scene(self, mode: str = None):
+        if mode is not None and self.combo_view.currentText() != mode:
+            self.combo_view.blockSignals(True)
+            self.combo_view.setCurrentText(mode)
+            self.combo_view.blockSignals(False)
         if self.session.cloud is None:
             return
         if not self.annotating:
             self._show_browse_scene()
         else:
             self._show_annotate_scene()
-        mode = self.combo_view.currentText()
-        if mode == "RGB":
+        mode_text = self.combo_view.currentText()
+        if mode_text == "RGB":
             self.act_view_rgb.setChecked(True)
-        elif mode == "语义":
+        elif mode_text == "语义":
             self.act_view_sem.setChecked(True)
-        elif mode == "实例":
+        elif mode_text == "实例":
             self.act_view_inst.setChecked(True)
-        elif mode == "标签":
+        elif mode_text == "标签":
             self.act_view_label.setChecked(True)
-
-    def _set_view_mode(self, mode: str):
-        self.combo_view.setCurrentText(mode)
-        self.on_view_mode_changed()
 
     def on_select_instance_menu(self):
         if self.session.cloud is None or self.combo_inst.count() == 0:
@@ -1383,23 +1420,32 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
             QMessageBox.critical(self, "读取失败", str(e))
             return
 
-        export_dir = QFileDialog.getExistingDirectory(
-            self, "选择标注导出目录", self._settings.value("export_dir", os.path.dirname(path), type=str)
-        )
-        if export_dir:
-            self._settings.setValue("export_dir", export_dir)
-
         base = os.path.splitext(os.path.basename(path))[0]
         data_dir = os.path.dirname(path)
         export_dir = self._settings.value("export_dir", "", type=str)
         cand_paths = [os.path.join(data_dir, f"{base}.json")]
         if export_dir:
             cand_paths.append(os.path.join(export_dir, f"{base}.json"))
+        loaded_msgs = []
         for ap in cand_paths:
             if os.path.isfile(ap):
                 try:
                     self.session.load_annotations_json(ap)
-                    self._update_status(f"已自动导入标注：{os.path.basename(ap)}")
+                    loaded_msgs.append(f"已自动导入标注：{os.path.basename(ap)}")
+                except Exception:
+                    pass
+                break
+
+        label_paths = [os.path.join(data_dir, f"{base}_labels.txt")]
+        if export_dir:
+            label_paths.append(os.path.join(export_dir, f"{base}_labels.txt"))
+        for lp in label_paths:
+            if os.path.isfile(lp):
+                try:
+                    full_labels = np.loadtxt(lp, dtype=np.int64)
+                    if len(full_labels) == len(self.session.get_full_xyz()):
+                        self.session.full_point_labels = full_labels
+                        loaded_msgs.append(f"已自动导入标签：{os.path.basename(lp)}")
                 except Exception:
                     pass
                 break
@@ -1421,9 +1467,10 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         self.temp_width_ctrl_indices = []
 
         self._update_buttons()
-        self._show_browse_scene()
+        self._refresh_scene()
         self._refresh_point_lists()
-        self._update_status("浏览模式：可切换 RGB / Semantic / Instance 显示整株。")
+        loaded_msgs.append("浏览模式：可切换 RGB / 语义 / 实例 显示整株。")
+        self._update_status("\n".join(loaded_msgs))
 
     def on_start_annotation(self):
         if self.combo_inst.count() == 0:
@@ -1449,7 +1496,10 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         self.session.width_path_points = None
 
         self._update_buttons()
-        self._show_annotate_scene()
+        if self.session.point_labels is not None:
+            self._refresh_scene(mode="标签")
+        else:
+            self._refresh_scene()
         self._refresh_point_lists()
 
         extra = "该实例已标注：已恢复 base/tip/ctrl/W1/W2，并显示缓存中心线/宽线。" if self.session.is_current_annotated() else "该实例未标注。"
@@ -1491,7 +1541,10 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
             self.session.width_path_points = None
 
             self._update_buttons()
-            self._show_annotate_scene()
+            if self.session.point_labels is not None:
+                self._refresh_scene(mode="标签")
+            else:
+                self._refresh_scene()
             self._refresh_point_lists()
 
             extra = "该实例已标注：已恢复 base/tip/ctrl/W1/W2，并显示缓存中心线/宽线。" if self.session.is_current_annotated() else "该实例未标注。"
@@ -1571,38 +1624,32 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         self._update_status(f"已导出整株标注：{os.path.basename(out_path)}")
 
     def on_export_labeled_cloud(self):
+        radius, ok = QtWidgets.QInputDialog.getDouble(
+            self, "标记半径", "输入 r（单位同点云）：", value=0.005,
+            min=0.0, max=1000.0, decimals=6
+        )
+        if not ok:
+            return
+        self.session.params.label_radius = float(radius)
         if self.session.point_labels is None:
-            radius, ok = QtWidgets.QInputDialog.getDouble(
-                self, "????", "?????", value=float(self.session.params.label_radius),
-                min=0.0, max=1000.0, decimals=6
-            )
-            if not ok:
+            if self.session.centerline_result is None:
+                QMessageBox.information(self, "提示", "请先生成叶长或加载已有结果。")
                 return
-            self.session.params.label_radius = float(radius)
+            if self.session.width_path_points is None:
+                QMessageBox.information(self, "提示", "请先生成叶宽路径或加载已有结果。")
+                return
             self.session.point_labels = self.session.compute_point_labels(self.session.params.label_radius)
-            if self.session.point_labels is None:
-                QMessageBox.information(self, "提示", "当前实例没有点标签，请先计算叶长/叶宽。")
-                return
-        self._set_view_mode("标签")
-        if self.annotating:
-            self._show_annotate_scene()
-        else:
-            self._show_browse_scene()
+        if self.session.point_labels is None:
+            QMessageBox.information(self, "提示", "当前无法生成标签，请先生成叶长和叶宽路径。")
+            return
+        self._refresh_scene(mode="标签")
         QMessageBox.information(self, "完成", "已生成标签并更新视图。")
 
     def on_save_annotations(self):
         if self.session.get_annotations_count() == 0:
             QMessageBox.information(self, "提示", "当前文件还没有任何实例被标注。")
             return
-        if self.session.point_labels is None:
-            radius, ok = QtWidgets.QInputDialog.getDouble(
-                self, "????", "?????", value=float(self.session.params.label_radius),
-                min=0.0, max=1000.0, decimals=6
-            )
-            if not ok:
-                return
-            self.session.params.label_radius = float(radius)
-            self.session.point_labels = self.session.compute_point_labels(self.session.params.label_radius)
+        self.session.point_labels = self.session.compute_point_labels(self.session.params.label_radius)
         export_dir = self._settings.value("export_dir", "", type=str)
         if not export_dir:
             export_dir = QFileDialog.getExistingDirectory(self, "选择标注导出目录", self._settings.value("last_dir", "", type=str))

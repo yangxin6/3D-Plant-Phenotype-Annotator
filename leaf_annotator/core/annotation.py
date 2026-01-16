@@ -149,9 +149,27 @@ class LeafAnnotationSession:
         self.centerline_result = None              # 有 smooth_points / length
         self.width_path_points: Optional[np.ndarray] = None
         self.width_path_length: Optional[float] = None
+        self.width_path_indices: Optional[np.ndarray] = None
         self.point_labels: Optional[np.ndarray] = None
+        self.full_point_labels: Optional[np.ndarray] = None
 
         self.annotations: Dict[int, Dict[str, Any]] = {}
+
+    def _require_cloud(self):
+        if self.cloud is None:
+            raise RuntimeError("请先加载点云文件。")
+
+    def _require_instance(self):
+        if self.ds is None or self.leaf_pts is None:
+            raise RuntimeError("请先选择实例。")
+
+    def _require_base_tip(self):
+        if self.base_idx is None or self.tip_idx is None:
+            raise RuntimeError("请先选择叶基(B1)和叶尖(T1)。")
+
+    def _require_width_endpoints(self):
+        if self.width_w1_idx is None or self.width_w2_idx is None:
+            raise RuntimeError("请先选择叶宽端点 W1/W2。")
 
     # ---------- full cloud ----------
     def load(self, path: str):
@@ -159,6 +177,7 @@ class LeafAnnotationSession:
         self.cloud = CloudParser.parse(arr, self.schema)
         self.file_path = path
         self.annotations = {}
+        self.full_point_labels = None
         self.clear_instance_state()
 
     def load_annotations_json(self, path: str):
@@ -174,23 +193,19 @@ class LeafAnnotationSession:
         return (self.cloud is not None) and (self.cloud.rgb is not None)
 
     def get_full_xyz(self) -> np.ndarray:
-        if self.cloud is None:
-            raise RuntimeError("未加载点云。")
+        self._require_cloud()
         return self.cloud.xyz
 
     def get_full_rgb(self) -> Optional[np.ndarray]:
-        if self.cloud is None:
-            raise RuntimeError("未加载点云。")
+        self._require_cloud()
         return self.cloud.rgb
 
     def get_full_sem(self) -> np.ndarray:
-        if self.cloud is None:
-            raise RuntimeError("未加载点云。")
+        self._require_cloud()
         return self.cloud.sem
 
     def get_full_inst(self) -> np.ndarray:
-        if self.cloud is None:
-            raise RuntimeError("未加载点云。")
+        self._require_cloud()
         return self.cloud.inst
 
     def list_instance_ids(self) -> np.ndarray:
@@ -224,11 +239,11 @@ class LeafAnnotationSession:
         self.centerline_result = None
         self.width_path_points = None
         self.width_path_length = None
+        self.width_path_indices = None
         self.point_labels = None
 
     def select_instance(self, inst_id: int):
-        if self.cloud is None:
-            raise RuntimeError("未加载点云。")
+        self._require_cloud()
         inst_id = int(inst_id)
         mask = (self.cloud.inst == inst_id)
         if not np.any(mask):
@@ -257,24 +272,28 @@ class LeafAnnotationSession:
         self.centerline_result = None
         self.width_path_points = None
         self.width_path_length = None
+        self.width_path_indices = None
         self.point_labels = None
 
         self.restore_picks_from_cache(inst_id)
+        if self.full_point_labels is not None and self.leaf_global_idx is not None:
+            if len(self.full_point_labels) == len(self.cloud.xyz):
+                self.point_labels = self.full_point_labels[self.leaf_global_idx]
 
     def get_ds_points(self) -> np.ndarray:
-        if self.ds is None:
-            raise RuntimeError("请先选择实例。")
+        self._require_instance()
         return self.ds.points
 
     def get_ds_global_indices(self) -> np.ndarray:
-        if self.ds is None or self.leaf_global_idx is None:
+        self._require_instance()
+        if self.leaf_global_idx is None:
             raise RuntimeError("请先选择实例。")
         leaf_local = self.ds.src_indices.astype(np.int64)
         return self.leaf_global_idx[leaf_local].astype(np.int64)
 
     def snap_to_ds_index(self, point_xyz: np.ndarray) -> int:
         if self.ds_tree is None:
-            raise RuntimeError("请先选择一个实例。")
+            raise RuntimeError("请先选择实例。")
         _, idx = self.ds_tree.query(point_xyz, k=1)
         return int(idx)
 
@@ -323,10 +342,8 @@ class LeafAnnotationSession:
         """
         叶长：直接连接 B1 -> ctrl... -> T1
         """
-        if self.ds is None:
-            raise RuntimeError("请先选择实例。")
-        if self.base_idx is None or self.tip_idx is None:
-            raise RuntimeError("请先选择叶基(B1)和叶尖(T1)。")
+        self._require_instance()
+        self._require_base_tip()
 
         seq = [int(self.base_idx)]
         if use_ctrl and len(self.ctrl_indices) > 0:
@@ -351,10 +368,8 @@ class LeafAnnotationSession:
         2）对最短路按 step 等距重采样，并在每个 step 内局部“薄片”修正到质心附近的点。
         结果写入 self.centerline_result（含 smooth_points/length/path_indices）。
         """
-        if self.ds is None:
-            raise RuntimeError("请先选择实例。")
-        if self.base_idx is None or self.tip_idx is None:
-            raise RuntimeError("请先选择叶基(B1)和叶尖(T1)。")
+        self._require_instance()
+        self._require_base_tip()
 
         chain: List[int] = [int(self.base_idx)]
         if use_ctrl and len(self.ctrl_indices) > 0:
@@ -368,7 +383,7 @@ class LeafAnnotationSession:
         for a, b in zip(chain[:-1], chain[1:]):
             pidx = _shortest_path_indices(G, int(a), int(b))
             if pidx is None or len(pidx) == 0:
-                raise RuntimeError("kNN 图不连通：起点到终点不可达。请增大 k 或减小 voxel。")
+                raise RuntimeError("kNN 图不连通：起点到终点不可达，请增大 k 或减小 voxel。")
             if path_all:
                 pidx = pidx[1:]
             path_all.extend([int(i) for i in pidx])
@@ -451,10 +466,8 @@ class LeafAnnotationSession:
         return self.centerline_result
 
     def compute_centerline_polyline(self, use_ctrl: bool = True):
-        if self.ds is None:
-            raise RuntimeError("è¯·å…ˆé€‰æ‹©å®žä¾‹ã€?")
-        if self.base_idx is None or self.tip_idx is None:
-            raise RuntimeError("è¯·å…ˆé€‰æ‹©å¶åŸº(B1)å’Œå¶å°?T1)ã€?")
+        self._require_instance()
+        self._require_base_tip()
 
         poly = self.build_length_polyline(use_ctrl=use_ctrl)
         L = _polyline_length(poly)
@@ -465,7 +478,6 @@ class LeafAnnotationSession:
         )
         return self.centerline_result
 
-    # ---------- width recommendation ----------
     def recommend_width_endpoints(self, overwrite: bool = False) -> bool:
         """
         用旧的“最大叶宽”算法给出 W1/W2 推荐点（snap 到 ds 索引）。
@@ -521,21 +533,22 @@ class LeafAnnotationSession:
         - 叶长：优先用 kNN 图最短路径 + step 重采样薄片修正（B1->ctrl...->T1），失败则回退为直连折线
         - 叶宽：若有 W1/W2（用户或推荐），则计算最短路径（kNN 图）
         """
-        if self.leaf_pts is None or self.ds is None:
-            raise RuntimeError("请先选择一个实例。")
-        if self.base_idx is None or self.tip_idx is None:
-            raise RuntimeError("请先选择叶基(B1)和叶尖(T1)。")
+        self._require_instance()
+        self._require_base_tip()
 
         try:
-            self.compute_centerline_polyline(use_ctrl=True)
+            self.compute_centerline(use_ctrl=True)
         except Exception:
-            length_poly = self.build_length_polyline(use_ctrl=True)
-            L = _polyline_length(length_poly)
-            self.centerline_result = SimpleNamespace(
-                smooth_points=length_poly,
-                length=float(L if L is not None else 0.0),
-                path_indices=None,
-            )
+            try:
+                self.compute_centerline_polyline(use_ctrl=True)
+            except Exception:
+                length_poly = self.build_length_polyline(use_ctrl=True)
+                L = _polyline_length(length_poly)
+                self.centerline_result = SimpleNamespace(
+                    smooth_points=length_poly,
+                    length=float(L if L is not None else 0.0),
+                    path_indices=None,
+                )
 
         # 如果用户没设置 W1/W2，就推荐一次
         self.recommend_width_endpoints(overwrite=False)
@@ -564,39 +577,96 @@ class LeafAnnotationSession:
                 path_all.extend([int(i) for i in pidx])
 
             if ok and len(path_all) >= 2:
-                path_pts = pts[np.array(path_all, dtype=np.int64)]
+                path_idx = np.asarray(path_all, dtype=np.int64)
+                path_pts = pts[path_idx]
                 self.width_path_points = path_pts
                 self.width_path_length = _polyline_length(path_pts)
+                self.width_path_indices = path_idx
+            else:
+                self.width_path_indices = None
+        else:
+            self.width_path_indices = None
 
         self.point_labels = self.compute_point_labels(self.params.label_radius)
 
+    def compute_width_path(self):
+        self._require_instance()
+        self._require_width_endpoints()
+
+        pts = self.ds.points
+        G = _build_knn_graph(pts, k=self.params.k)
+        chain: List[int] = [int(self.width_w1_idx)]
+        if len(self.width_ctrl_indices) > 0:
+            chain += [int(i) for i in self.get_sorted_width_ctrl_indices()]
+        chain.append(int(self.width_w2_idx))
+
+        path_all: List[int] = []
+        for a, b in zip(chain[:-1], chain[1:]):
+            pidx = _shortest_path_indices(G, int(a), int(b))
+            if pidx is None or len(pidx) == 0:
+                raise RuntimeError("叶宽最短路径不可达，请调整 W1/W2 或增加 k。")
+            if path_all:
+                pidx = pidx[1:]
+            path_all.extend([int(i) for i in pidx])
+
+        if len(path_all) < 2:
+            raise RuntimeError("叶宽路径过短，无法生成。")
+
+        path_idx = np.asarray(path_all, dtype=np.int64)
+        path_pts = pts[path_idx]
+        self.width_path_points = path_pts
+        self.width_path_length = _polyline_length(path_pts)
+        self.width_path_indices = path_idx
+
     def compute_point_labels(self, radius: float = 0.01) -> Optional[np.ndarray]:
         if self.leaf_pts is None:
+            return None
+        if self.centerline_result is None or self.width_path_points is None:
             return None
         n = len(self.leaf_pts)
         if n == 0:
             return np.zeros((0,), dtype=np.int64)
         labels = np.full(n, -1, dtype=np.int64)
-        tree = cKDTree(self.leaf_pts)
+        r = float(radius)
+        if r <= 0:
+            return labels
 
-        def _mark(points: Optional[np.ndarray], value: int):
-            if points is None or len(points) == 0:
-                return
-            r = float(radius)
-            if r <= 0:
-                return
-            idx_lists = tree.query_ball_point(points, r=r)
-            for idx in idx_lists:
-                if len(idx) > 0:
-                    labels[np.asarray(idx, dtype=np.int64)] = int(value)
+        def _points_within_polyline_radius(poly: Optional[np.ndarray]) -> Optional[np.ndarray]:
+            if poly is None or len(poly) < 2:
+                return None
+            P = np.asarray(poly, dtype=np.float64)
+            A = P[:-1]
+            B = P[1:]
+            AB = B - A
+            denom = (AB * AB).sum(axis=1)
+            denom = np.maximum(denom, 1e-12)
+            pts = self.leaf_pts.astype(np.float64)
+            hit = np.zeros(len(pts), dtype=bool)
+            for i in range(len(A)):
+                a = A[i]
+                ab = AB[i]
+                d = denom[i]
+                ap = pts - a
+                t = (ap @ ab) / d
+                t = np.clip(t, 0.0, 1.0)
+                proj = a + t[:, None] * ab
+                dist = np.linalg.norm(pts - proj, axis=1)
+                hit |= dist <= r
+            idx = np.where(hit)[0]
+            return idx
 
-        if self.centerline_result is not None:
-            _mark(np.asarray(self.centerline_result.smooth_points, dtype=np.float64), 0)
-        else:
-            base_poly = self.build_length_polyline(use_ctrl=True)
-            _mark(np.asarray(base_poly, dtype=np.float64), 0)
-        if self.width_path_points is not None:
-            _mark(np.asarray(self.width_path_points, dtype=np.float64), 1)
+        length_pts = None
+        if self.centerline_result is not None and self.centerline_result.smooth_points is not None:
+            length_pts = np.asarray(self.centerline_result.smooth_points, dtype=np.float64)
+        elif self.base_idx is not None and self.tip_idx is not None:
+            length_pts = self.build_length_polyline(use_ctrl=True)
+
+        idx_len = _points_within_polyline_radius(length_pts)
+        if idx_len is not None and len(idx_len) > 0:
+            labels[idx_len] = 0
+        idx_w = _points_within_polyline_radius(self.width_path_points)
+        if idx_w is not None and len(idx_w) > 0:
+            labels[idx_w] = 1
 
         return labels
 
@@ -669,10 +739,28 @@ class LeafAnnotationSession:
         elif picked.get("w2_ds") is not None:
             self.width_w2_idx = int(picked["w2_ds"])
 
-        if ann.get("point_labels") is not None:
-            labels = np.asarray(ann.get("point_labels"), dtype=np.int64)
-            if self.leaf_pts is not None and len(labels) == len(self.leaf_pts):
-                self.point_labels = labels
+        cl = ann.get("centerline")
+        if cl is not None:
+            cl_arr = np.asarray(cl, dtype=np.float64)
+            L = _polyline_length(cl_arr)
+            self.centerline_result = SimpleNamespace(
+                smooth_points=cl_arr,
+                length=float(L if L is not None else 0.0),
+                path_indices=None,
+            )
+
+        wp = ann.get("width_path")
+        if wp is not None:
+            wp_arr = np.asarray(wp, dtype=np.float64)
+            self.width_path_points = wp_arr
+            self.width_path_length = _polyline_length(wp_arr)
+            self.width_path_indices = None
+
+        labels = ann.get("point_labels")
+        if labels is not None and self.leaf_pts is not None:
+            labels_arr = np.asarray(labels, dtype=np.int64)
+            if len(labels_arr) == len(self.leaf_pts):
+                self.point_labels = labels_arr
 
         # 只要是从缓存恢复的，就认为“推荐过/用户已有”，避免自动覆盖
         if (self.width_w1_idx is not None) or (self.width_w2_idx is not None):
@@ -680,9 +768,9 @@ class LeafAnnotationSession:
 
     def commit_current(self, include_width_profile: bool = False):
         if self.current_inst_id is None:
-            raise RuntimeError("未选择实例。")
+            raise RuntimeError("请先选择实例。")
         if self.centerline_result is None:
-            raise RuntimeError("当前实例还未计算中心线/宽度。")
+            raise RuntimeError("请先计算叶长/叶宽。")
 
         inst_id = int(self.current_inst_id)
 
@@ -732,8 +820,7 @@ class LeafAnnotationSession:
 
     # ---------- export all ----------
     def export_all_json(self, out_path: str):
-        if self.cloud is None:
-            raise RuntimeError("未加载点云。")
+        self._require_cloud()
         if len(self.annotations) == 0:
             raise RuntimeError("当前文件还没有任何实例被标注。")
 
@@ -754,11 +841,10 @@ class LeafAnnotationSession:
             json.dump(out, f, ensure_ascii=False, indent=2)
 
     def export_labeled_point_cloud(self, out_path: str):
-        if self.cloud is None:
-            raise RuntimeError("未加载点云。")
+        self._require_cloud()
         if self.point_labels is None or self.leaf_global_idx is None:
-            raise RuntimeError("当前实例没有点标签。")
-        full_labels = np.zeros((len(self.cloud.xyz),), dtype=np.int64)
+            raise RuntimeError("请先生成点标签。")
+        full_labels = np.full((len(self.cloud.xyz),), -1, dtype=np.int64)
         if len(self.point_labels) == len(self.leaf_global_idx):
             full_labels[self.leaf_global_idx] = self.point_labels
         os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
