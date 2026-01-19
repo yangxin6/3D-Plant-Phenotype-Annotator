@@ -133,10 +133,10 @@ class LeafAnnotationSession:
         self.tip_idx: Optional[int] = None
         self.ctrl_indices: List[int] = []
         self.ctrl_ids: List[int] = []
-        self._next_ctrl_id: int = 1
+        self._next_ctrl_id: int = 10
         self.width_ctrl_indices: List[int] = []
         self.width_ctrl_ids: List[int] = []
-        self._next_width_ctrl_id: int = 1
+        self._next_width_ctrl_id: int = 10
 
         # width endpoints (ds index)
         self.width_w1_idx: Optional[int] = None
@@ -147,6 +147,7 @@ class LeafAnnotationSession:
 
         # results
         self.centerline_result = None              # 有 smooth_points / length
+        self.centerline_source: Optional[str] = None
         self.width_path_points: Optional[np.ndarray] = None
         self.width_path_length: Optional[float] = None
         self.width_path_indices: Optional[np.ndarray] = None
@@ -154,6 +155,8 @@ class LeafAnnotationSession:
         self.full_point_labels: Optional[np.ndarray] = None
 
         self.annotations: Dict[int, Dict[str, Any]] = {}
+        self.instance_meta: Dict[int, Dict[str, str]] = {}
+        self.use_cached_results: bool = True
 
     def _require_cloud(self):
         if self.cloud is None:
@@ -177,6 +180,7 @@ class LeafAnnotationSession:
         self.cloud = CloudParser.parse(arr, self.schema)
         self.file_path = path
         self.annotations = {}
+        self.instance_meta = {}
         self.full_point_labels = None
         self.clear_instance_state()
 
@@ -185,9 +189,17 @@ class LeafAnnotationSession:
             data = json.load(f)
         ann_list = data.get("annotations", [])
         self.annotations = {}
+        self.instance_meta = {}
         for ann in ann_list:
             inst_id = int(ann.get("inst_id"))
             self.annotations[inst_id] = ann
+            meta = {}
+            if "remark" in ann:
+                meta["remark"] = str(ann.get("remark") or "")
+            if "label_desc" in ann:
+                meta["label_desc"] = str(ann.get("label_desc") or "")
+            if meta:
+                self.instance_meta[inst_id] = meta
 
     def has_rgb(self) -> bool:
         return (self.cloud is not None) and (self.cloud.rgb is not None)
@@ -227,16 +239,17 @@ class LeafAnnotationSession:
         self.tip_idx = None
         self.ctrl_indices = []
         self.ctrl_ids = []
-        self._next_ctrl_id = 1
+        self._next_ctrl_id = 10
         self.width_ctrl_indices = []
         self.width_ctrl_ids = []
-        self._next_width_ctrl_id = 1
+        self._next_width_ctrl_id = 10
 
         self.width_w1_idx = None
         self.width_w2_idx = None
         self._width_recommended_once = False
 
         self.centerline_result = None
+        self.centerline_source = None
         self.width_path_points = None
         self.width_path_length = None
         self.width_path_indices = None
@@ -260,16 +273,17 @@ class LeafAnnotationSession:
         self.tip_idx = None
         self.ctrl_indices = []
         self.ctrl_ids = []
-        self._next_ctrl_id = 1
+        self._next_ctrl_id = 10
         self.width_ctrl_indices = []
         self.width_ctrl_ids = []
-        self._next_width_ctrl_id = 1
+        self._next_width_ctrl_id = 10
 
         self.width_w1_idx = None
         self.width_w2_idx = None
         self._width_recommended_once = False
 
         self.centerline_result = None
+        self.centerline_source = None
         self.width_path_points = None
         self.width_path_length = None
         self.width_path_indices = None
@@ -302,7 +316,7 @@ class LeafAnnotationSession:
     def add_ctrl(self, ds_index: int):
         self.ctrl_indices.append(int(ds_index))
         self.ctrl_ids.append(self._next_ctrl_id)
-        self._next_ctrl_id += 1
+        self._next_ctrl_id += 10
 
     def extend_ctrl(self, ds_indices: List[int]):
         for i in ds_indices:
@@ -311,12 +325,12 @@ class LeafAnnotationSession:
     def clear_ctrl(self):
         self.ctrl_indices = []
         self.ctrl_ids = []
-        self._next_ctrl_id = 1
+        self._next_ctrl_id = 10
 
     def add_width_ctrl(self, ds_index: int):
         self.width_ctrl_indices.append(int(ds_index))
         self.width_ctrl_ids.append(self._next_width_ctrl_id)
-        self._next_width_ctrl_id += 1
+        self._next_width_ctrl_id += 10
 
     def extend_width_ctrl(self, ds_indices: List[int]):
         for i in ds_indices:
@@ -325,7 +339,7 @@ class LeafAnnotationSession:
     def clear_width_ctrl(self):
         self.width_ctrl_indices = []
         self.width_ctrl_ids = []
-        self._next_width_ctrl_id = 1
+        self._next_width_ctrl_id = 10
 
     def get_sorted_ctrl_indices(self) -> List[int]:
         pairs = list(zip(self.ctrl_ids, self.ctrl_indices))
@@ -336,6 +350,19 @@ class LeafAnnotationSession:
         pairs = list(zip(self.width_ctrl_ids, self.width_ctrl_indices))
         pairs.sort(key=lambda x: x[0])
         return [idx for _, idx in pairs]
+
+    def _set_centerline_result(self, result: SimpleNamespace, source: str):
+        if result is None:
+            return
+        if source == "polyline":
+            self.centerline_result = result
+            self.centerline_source = "polyline"
+            return
+        if source == "recommended":
+            if self.centerline_source == "polyline":
+                return
+            self.centerline_result = result
+            self.centerline_source = "recommended"
 
     # ---------- leaf length polyline ----------
     def build_length_polyline(self, use_ctrl: bool = True) -> np.ndarray:
@@ -457,12 +484,21 @@ class LeafAnnotationSession:
                 refined_pts.append(pts[int(j)])
 
         refined_poly = np.asarray(refined_pts, dtype=np.float64)
+        if len(refined_pts) > 0:
+            if self.base_idx is not None:
+                refined_idx[0] = int(self.base_idx)
+                refined_pts[0] = pts[int(self.base_idx)]
+            if self.tip_idx is not None:
+                refined_idx[-1] = int(self.tip_idx)
+                refined_pts[-1] = pts[int(self.tip_idx)]
+            refined_poly = np.asarray(refined_pts, dtype=np.float64)
         L = _polyline_length(refined_poly)
-        self.centerline_result = SimpleNamespace(
+        result = SimpleNamespace(
             smooth_points=refined_poly,
             length=float(L if L is not None else 0.0),
             path_indices=np.asarray(refined_idx, dtype=np.int64),
         )
+        self._set_centerline_result(result, "recommended")
         return self.centerline_result
 
     def compute_centerline_polyline(self, use_ctrl: bool = True):
@@ -471,11 +507,12 @@ class LeafAnnotationSession:
 
         poly = self.build_length_polyline(use_ctrl=use_ctrl)
         L = _polyline_length(poly)
-        self.centerline_result = SimpleNamespace(
+        result = SimpleNamespace(
             smooth_points=poly,
             length=float(L if L is not None else 0.0),
             path_indices=None,
         )
+        self._set_centerline_result(result, "polyline")
         return self.centerline_result
 
     def recommend_width_endpoints(self, overwrite: bool = False) -> bool:
@@ -496,11 +533,15 @@ class LeafAnnotationSession:
             if self.width_w1_idx is not None or self.width_w2_idx is not None:
                 return False
 
-        # 优先使用已生成的叶长（最短路径/带控制点），否则用直连折线
-        if self.centerline_result is not None:
-            length_poly = np.asarray(self.centerline_result.smooth_points, dtype=np.float64)
-        else:
+        # 叶宽端点推荐：优先使用控制点折线，保证稳定可控
+        try:
             length_poly = self.build_length_polyline(use_ctrl=True)
+        except Exception:
+            length_poly = None
+        if length_poly is None and self.centerline_result is not None:
+            length_poly = np.asarray(self.centerline_result.smooth_points, dtype=np.float64)
+        if length_poly is None:
+            return False
 
         # 用旧 WidthEstimator 找最大叶宽段
         we = WidthEstimator(
@@ -527,6 +568,9 @@ class LeafAnnotationSession:
         self._width_recommended_once = True
         return True
 
+    def recommend_width_endpoints_auto(self) -> bool:
+        return self.recommend_width_endpoints(overwrite=False)
+
     # ---------- compute ----------
     def compute(self):
         """
@@ -544,11 +588,12 @@ class LeafAnnotationSession:
             except Exception:
                 length_poly = self.build_length_polyline(use_ctrl=True)
                 L = _polyline_length(length_poly)
-                self.centerline_result = SimpleNamespace(
+                result = SimpleNamespace(
                     smooth_points=length_poly,
                     length=float(L if L is not None else 0.0),
                     path_indices=None,
                 )
+                self._set_centerline_result(result, "polyline")
 
         # 如果用户没设置 W1/W2，就推荐一次
         self.recommend_width_endpoints(overwrite=False)
@@ -662,11 +707,15 @@ class LeafAnnotationSession:
             length_pts = self.build_length_polyline(use_ctrl=True)
 
         idx_len = _points_within_polyline_radius(length_pts)
+        idx_w = _points_within_polyline_radius(self.width_path_points)
         if idx_len is not None and len(idx_len) > 0:
             labels[idx_len] = 0
-        idx_w = _points_within_polyline_radius(self.width_path_points)
         if idx_w is not None and len(idx_w) > 0:
             labels[idx_w] = 1
+        if idx_len is not None and len(idx_len) > 0 and idx_w is not None and len(idx_w) > 0:
+            overlap = np.intersect1d(idx_len, idx_w, assume_unique=False)
+            if len(overlap) > 0:
+                labels[overlap] = 100
 
         return labels
 
@@ -680,7 +729,43 @@ class LeafAnnotationSession:
     def is_current_annotated(self) -> bool:
         return (self.current_inst_id is not None) and (int(self.current_inst_id) in self.annotations)
 
+    def _build_export_annotations(self) -> List[Dict[str, Any]]:
+        keys = set(self.annotations.keys()) | set(self.instance_meta.keys())
+        if not keys:
+            return []
+        out: List[Dict[str, Any]] = []
+        for inst_id in sorted(keys):
+            if inst_id in self.annotations:
+                out.append(self.annotations[inst_id])
+                continue
+            meta = self.instance_meta.get(inst_id, {})
+            ann: Dict[str, Any] = {"inst_id": int(inst_id)}
+            if "remark" in meta:
+                ann["remark"] = str(meta.get("remark") or "")
+            if "label_desc" in meta:
+                ann["label_desc"] = str(meta.get("label_desc") or "")
+            out.append(ann)
+        return out
+
+    def get_instance_meta(self, inst_id: int) -> Tuple[str, str]:
+        meta = self.instance_meta.get(int(inst_id), {})
+        remark = str(meta.get("remark") or "")
+        label_desc = str(meta.get("label_desc") or "")
+        return remark, label_desc
+
+    def set_instance_meta(self, inst_id: int, remark: str, label_desc: str):
+        inst_id = int(inst_id)
+        meta = self.instance_meta.setdefault(inst_id, {})
+        meta["remark"] = "" if remark is None else str(remark)
+        meta["label_desc"] = "" if label_desc is None else str(label_desc)
+        ann = self.annotations.get(inst_id)
+        if ann is not None:
+            ann["remark"] = meta["remark"]
+            ann["label_desc"] = meta["label_desc"]
+
     def get_cached_display(self, inst_id: int) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        if not self.use_cached_results:
+            return None, None
         ann = self.annotations.get(int(inst_id))
         if ann is None:
             return None, None
@@ -699,68 +784,70 @@ class LeafAnnotationSession:
             p = xyz_full[int(gidx)]
             return self.snap_to_ds_index(p)
 
-        if picked.get("base_global") is not None:
-            self.base_idx = global_to_ds(picked["base_global"])
-        elif picked.get("base_ds") is not None:
+        if picked.get("base_ds") is not None:
             self.base_idx = int(picked["base_ds"])
+        elif picked.get("base_global") is not None:
+            self.base_idx = global_to_ds(picked["base_global"])
 
-        if picked.get("tip_global") is not None:
-            self.tip_idx = global_to_ds(picked["tip_global"])
-        elif picked.get("tip_ds") is not None:
+        if picked.get("tip_ds") is not None:
             self.tip_idx = int(picked["tip_ds"])
+        elif picked.get("tip_global") is not None:
+            self.tip_idx = global_to_ds(picked["tip_global"])
 
         ctrl_ds: List[int] = []
-        if picked.get("ctrl_global") is not None:
+        if picked.get("ctrl_ds") is not None:
+            ctrl_ds = [int(i) for i in picked["ctrl_ds"]]
+        elif picked.get("ctrl_global") is not None:
             for g in picked["ctrl_global"]:
                 ctrl_ds.append(global_to_ds(g))
-        elif picked.get("ctrl_ds") is not None:
-            ctrl_ds = [int(i) for i in picked["ctrl_ds"]]
         self.ctrl_indices = ctrl_ds
         self.ctrl_ids = [int(i) for i in ann.get("ctrl_ids", list(range(1, len(ctrl_ds) + 1)))]
-        self._next_ctrl_id = max(self.ctrl_ids, default=0) + 1
+        self._next_ctrl_id = ((max(self.ctrl_ids, default=0) // 10) + 1) * 10
 
         wctrl_ds: List[int] = []
-        if picked.get("wctrl_global") is not None:
+        if picked.get("wctrl_ds") is not None:
+            wctrl_ds = [int(i) for i in picked["wctrl_ds"]]
+        elif picked.get("wctrl_global") is not None:
             for g in picked["wctrl_global"]:
                 wctrl_ds.append(global_to_ds(g))
-        elif picked.get("wctrl_ds") is not None:
-            wctrl_ds = [int(i) for i in picked["wctrl_ds"]]
         self.width_ctrl_indices = wctrl_ds
         self.width_ctrl_ids = [int(i) for i in ann.get("wctrl_ids", list(range(1, len(wctrl_ds) + 1)))]
-        self._next_width_ctrl_id = max(self.width_ctrl_ids, default=0) + 1
+        self._next_width_ctrl_id = ((max(self.width_ctrl_ids, default=0) // 10) + 1) * 10
 
-        if picked.get("w1_global") is not None:
-            self.width_w1_idx = global_to_ds(picked["w1_global"])
-        elif picked.get("w1_ds") is not None:
+        if picked.get("w1_ds") is not None:
             self.width_w1_idx = int(picked["w1_ds"])
+        elif picked.get("w1_global") is not None:
+            self.width_w1_idx = global_to_ds(picked["w1_global"])
 
-        if picked.get("w2_global") is not None:
-            self.width_w2_idx = global_to_ds(picked["w2_global"])
-        elif picked.get("w2_ds") is not None:
+        if picked.get("w2_ds") is not None:
             self.width_w2_idx = int(picked["w2_ds"])
+        elif picked.get("w2_global") is not None:
+            self.width_w2_idx = global_to_ds(picked["w2_global"])
 
-        cl = ann.get("centerline")
-        if cl is not None:
-            cl_arr = np.asarray(cl, dtype=np.float64)
-            L = _polyline_length(cl_arr)
-            self.centerline_result = SimpleNamespace(
-                smooth_points=cl_arr,
-                length=float(L if L is not None else 0.0),
-                path_indices=None,
-            )
+        if self.use_cached_results:
+            cl = ann.get("centerline")
+            if cl is not None:
+                cl_arr = np.asarray(cl, dtype=np.float64)
+                L = _polyline_length(cl_arr)
+                self.centerline_result = SimpleNamespace(
+                    smooth_points=cl_arr,
+                    length=float(L if L is not None else 0.0),
+                    path_indices=None,
+                )
+                self.centerline_source = ann.get("centerline_source") or "polyline"
 
-        wp = ann.get("width_path")
-        if wp is not None:
-            wp_arr = np.asarray(wp, dtype=np.float64)
-            self.width_path_points = wp_arr
-            self.width_path_length = _polyline_length(wp_arr)
-            self.width_path_indices = None
+            wp = ann.get("width_path")
+            if wp is not None:
+                wp_arr = np.asarray(wp, dtype=np.float64)
+                self.width_path_points = wp_arr
+                self.width_path_length = _polyline_length(wp_arr)
+                self.width_path_indices = None
 
-        labels = ann.get("point_labels")
-        if labels is not None and self.leaf_pts is not None:
-            labels_arr = np.asarray(labels, dtype=np.int64)
-            if len(labels_arr) == len(self.leaf_pts):
-                self.point_labels = labels_arr
+            labels = ann.get("point_labels")
+            if labels is not None and self.leaf_pts is not None:
+                labels_arr = np.asarray(labels, dtype=np.int64)
+                if len(labels_arr) == len(self.leaf_pts):
+                    self.point_labels = labels_arr
 
         # 只要是从缓存恢复的，就认为“推荐过/用户已有”，避免自动覆盖
         if (self.width_w1_idx is not None) or (self.width_w2_idx is not None):
@@ -769,10 +856,12 @@ class LeafAnnotationSession:
     def commit_current(self, include_width_profile: bool = False):
         if self.current_inst_id is None:
             raise RuntimeError("请先选择实例。")
-        if self.centerline_result is None:
-            raise RuntimeError("请先计算叶长/叶宽。")
 
         inst_id = int(self.current_inst_id)
+        prev = self.annotations.get(inst_id, {})
+        meta = self.instance_meta.get(inst_id, {})
+        remark = meta.get("remark", prev.get("remark", ""))
+        label_desc = meta.get("label_desc", prev.get("label_desc", ""))
 
         def ds_to_global(ds_idx: int) -> int:
             g = self.get_ds_global_indices()
@@ -800,12 +889,15 @@ class LeafAnnotationSession:
             "picked": picked,
             "ctrl_ids": self.ctrl_ids,
             "wctrl_ids": self.width_ctrl_ids,
-            "centerline": self.centerline_result.smooth_points.tolist(),
-            "length": float(self.centerline_result.length),
-
             "width_path": None if self.width_path_points is None else self.width_path_points.tolist(),
             "width_path_length": None if self.width_path_length is None else float(self.width_path_length),
+            "remark": remark,
+            "label_desc": label_desc,
         }
+        if self.centerline_result is not None:
+            ann["centerline"] = self.centerline_result.smooth_points.tolist()
+            ann["length"] = float(self.centerline_result.length)
+            ann["centerline_source"] = self.centerline_source
         if self.point_labels is not None:
             ann["point_labels"] = self.point_labels.tolist()
             ann["point_label_global_indices"] = None if self.leaf_global_idx is None else self.leaf_global_idx.tolist()
@@ -817,11 +909,13 @@ class LeafAnnotationSession:
             ann["width_profile"] = []
 
         self.annotations[inst_id] = ann
+        self.instance_meta[inst_id] = {"remark": remark, "label_desc": label_desc}
 
     # ---------- export all ----------
     def export_all_json(self, out_path: str):
         self._require_cloud()
-        if len(self.annotations) == 0:
+        ann_list = self._build_export_annotations()
+        if len(ann_list) == 0:
             raise RuntimeError("当前文件还没有任何实例被标注。")
 
         out = {
@@ -833,7 +927,7 @@ class LeafAnnotationSession:
                 "rgb": None if self.schema.rgb_slice is None else f"{self.schema.rgb_slice.start}:{self.schema.rgb_slice.stop}",
             },
             "params": vars(self.params),
-            "annotations": [self.annotations[k] for k in sorted(self.annotations.keys())]
+            "annotations": ann_list
         }
 
         os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
