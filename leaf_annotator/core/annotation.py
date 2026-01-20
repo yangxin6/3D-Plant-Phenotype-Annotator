@@ -21,6 +21,7 @@ class AnnotationParams:
     k: int = 25
     smooth_win: int = 9  # 仍保留但叶长不再平滑
     label_radius: float = 0.01
+    graph_radius: float = 0.02
 
     # 旧“最大叶宽”估计参数（用于推荐）
     step: float = 0.01
@@ -82,6 +83,35 @@ def _build_knn_graph(points: np.ndarray, k: int) -> csr_matrix:
             w = float(dists[i, jpos])
             rows.append(i); cols.append(j); data.append(w)
             rows.append(j); cols.append(i); data.append(w)
+
+    G = csr_matrix(
+        (np.array(data, dtype=np.float64),
+         (np.array(rows, dtype=np.int32), np.array(cols, dtype=np.int32))),
+        shape=(n, n)
+    )
+    return G
+
+
+def _build_radius_graph(points: np.ndarray, radius: float) -> csr_matrix:
+    n = int(points.shape[0])
+    if n == 0:
+        return csr_matrix((0, 0), dtype=np.float64)
+    r = float(radius)
+    if r <= 0:
+        raise ValueError("graph_radius must be > 0")
+
+    tree = cKDTree(points)
+    rows: List[int] = []
+    cols: List[int] = []
+    data: List[float] = []
+
+    for i in range(n):
+        nbrs = tree.query_ball_point(points[i], r=r)
+        for j in nbrs:
+            if j == i:
+                continue
+            w = float(np.linalg.norm(points[i] - points[j]))
+            rows.append(i); cols.append(j); data.append(w)
 
     G = csr_matrix(
         (np.array(data, dtype=np.float64),
@@ -389,7 +419,7 @@ class LeafAnnotationSession:
     def compute_centerline(self, use_ctrl: bool = True):
         """
         叶长（中心线）两步：
-        1）在 downsample 点云上构建 kNN 图，分段最短路径：
+        1）在 downsample 点云上构建半径图，分段最短路径：
            - use_ctrl=False：B1 -> T1
            - use_ctrl=True： B1 -> C1 -> ... -> T1
         2）对最短路按 step 等距重采样，并在每个 step 内局部“薄片”修正到质心附近的点。
@@ -410,7 +440,7 @@ class LeafAnnotationSession:
         for a, b in zip(chain[:-1], chain[1:]):
             pidx = _shortest_path_indices(G, int(a), int(b))
             if pidx is None or len(pidx) == 0:
-                raise RuntimeError("kNN 图不连通：起点到终点不可达，请增大 k 或减小 voxel。")
+                raise RuntimeError("半径图不连通：起点到终点不可达，请增大 graph_radius。")
             if path_all:
                 pidx = pidx[1:]
             path_all.extend([int(i) for i in pidx])
@@ -574,7 +604,7 @@ class LeafAnnotationSession:
     # ---------- compute ----------
     def compute(self):
         """
-        - 叶长：优先用 kNN 图最短路径 + step 重采样薄片修正（B1->ctrl...->T1），失败则回退为直连折线
+        - 叶长：优先用半径图最短路径 + step 重采样薄片修正（B1->ctrl...->T1），失败则回退为直连折线
         - 叶宽：若有 W1/W2（用户或推荐），则计算最短路径（kNN 图）
         """
         self._require_instance()
@@ -639,7 +669,7 @@ class LeafAnnotationSession:
         self._require_width_endpoints()
 
         pts = self.ds.points
-        G = _build_knn_graph(pts, k=self.params.k)
+        G = _build_radius_graph(pts, radius=self.params.graph_radius)
         chain: List[int] = [int(self.width_w1_idx)]
         if len(self.width_ctrl_indices) > 0:
             chain += [int(i) for i in self.get_sorted_width_ctrl_indices()]

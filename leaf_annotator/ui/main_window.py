@@ -64,6 +64,7 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
     MODE_CTRL = "PICK_CTRL"
     MODE_WIDTH = "PICK_WIDTH"
     MODE_WIDTH_CTRL = "PICK_WIDTH_CTRL"
+    MODE_MEASURE = "MEASURE"
 
     # actor names
     A_CLOUD_FULL = "cloud_full"
@@ -88,6 +89,9 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
     A_LINE_WIDTH_CUR = "line_width_current"
     A_LINE_CENTER_CACHED = "line_center_cached"
     A_LINE_WIDTH_CACHED = "line_width_cached"
+    A_MEASURE_LINE = "measure_line"
+    A_MEASURE_P1 = "measure_p1"
+    A_MEASURE_P2 = "measure_p2"
 
     def __init__(self):
         super().__init__()
@@ -126,7 +130,6 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         self.act_recommend_width = calc_menu.addAction("推荐叶宽")
         self.act_generate_width = calc_menu.addAction("生成叶宽")
         calc_menu.addSeparator()
-        self.act_width_params = calc_menu.addAction("叶宽推荐参数...")
         self.act_export_labeled = calc_menu.addAction("生成标记点云")
         self.act_save_labels = menu.addAction("保存标注")
 
@@ -148,6 +151,8 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         # 叶宽两点：临时（开启期间）
         self.temp_w1_idx = None
         self.temp_w2_idx = None
+        self.temp_measure_p1 = None
+        self.temp_measure_p2 = None
 
         # VTK picker
         self._vtk_picker = vtk.vtkPointPicker()
@@ -188,7 +193,11 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         self.btn_toggle_ctrl = QtWidgets.QPushButton("叶长控制点选择：关闭")
         self.btn_toggle_width = QtWidgets.QPushButton("叶宽端点选择：关闭 (W1/W2)")
         self.btn_toggle_width_ctrl = QtWidgets.QPushButton("叶宽控制点选择：关闭")
-        for b in [self.btn_toggle_base, self.btn_toggle_tip, self.btn_toggle_ctrl, self.btn_toggle_width, self.btn_toggle_width_ctrl]:
+        self.btn_toggle_measure = QtWidgets.QPushButton("测距：关闭")
+        for b in [
+            self.btn_toggle_base, self.btn_toggle_tip, self.btn_toggle_ctrl,
+            self.btn_toggle_width, self.btn_toggle_width_ctrl, self.btn_toggle_measure
+        ]:
             b.setCheckable(True)
 
         self.btn_recommend_length = QtWidgets.QPushButton("推荐叶长（B1→T1）")
@@ -215,6 +224,12 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         inst_layout = QtWidgets.QVBoxLayout(inst_group)
         inst_layout.addWidget(self.combo_inst)
         panel.addWidget(inst_group)
+
+        # ---------- tools ----------
+        tools_group = QtWidgets.QGroupBox("工具")
+        tools_layout = QtWidgets.QVBoxLayout(tools_group)
+        tools_layout.addWidget(self.btn_toggle_measure)
+        panel.addWidget(tools_group)
 
         # ---------- instance meta ----------
         self.meta_group = QtWidgets.QGroupBox("实例备注")
@@ -243,6 +258,9 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         self.list_ctrl.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.list_width.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.list_width_ctrl.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.list_base.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.list_tip.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.list_width.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.list_ctrl.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.list_width_ctrl.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.list_base.setMaximumHeight(55)
@@ -300,12 +318,16 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
 
         self.list_ctrl.customContextMenuRequested.connect(self.on_ctrl_context_menu)
         self.list_width_ctrl.customContextMenuRequested.connect(self.on_width_ctrl_context_menu)
+        self.list_base.customContextMenuRequested.connect(self.on_base_context_menu)
+        self.list_tip.customContextMenuRequested.connect(self.on_tip_context_menu)
+        self.list_width.customContextMenuRequested.connect(self.on_width_context_menu)
 
         self.btn_toggle_base.toggled.connect(self.on_toggle_base)
         self.btn_toggle_tip.toggled.connect(self.on_toggle_tip)
         self.btn_toggle_ctrl.toggled.connect(self.on_toggle_ctrl)
         self.btn_toggle_width.toggled.connect(self.on_toggle_width)
         self.btn_toggle_width_ctrl.toggled.connect(self.on_toggle_width_ctrl)
+        self.btn_toggle_measure.toggled.connect(self.on_toggle_measure)
 
         self.btn_recommend_length.clicked.connect(self.on_recommend_length)
         self.btn_generate_length.clicked.connect(self.on_generate_length)
@@ -336,7 +358,6 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         self.act_generate_length.triggered.connect(self.on_generate_length)
         self.act_recommend_width.triggered.connect(self.on_recommend_width)
         self.act_generate_width.triggered.connect(self.on_generate_width)
-        self.act_width_params.triggered.connect(self.on_width_params_dialog)
         self.act_export_labeled.triggered.connect(self.on_export_labeled_cloud)
         self.act_save_labels.triggered.connect(self.on_save_annotations)
 
@@ -410,6 +431,7 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
             self.btn_recommend_width, self.btn_generate_width,
             self.btn_delete, self.btn_rename_ctrl,
             self.btn_toggle_width_ctrl, self.btn_rename_width_ctrl,
+            self.btn_toggle_measure,
         ]:
             b.setEnabled(in_anno)
         self.meta_group.setEnabled(in_anno)
@@ -430,7 +452,7 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         for a in [
             self.act_recommend_length, self.act_generate_length,
             self.act_recommend_width, self.act_generate_width,
-            self.act_width_params, self.act_export_labeled, self.act_save_labels,
+            self.act_export_labeled, self.act_save_labels,
         ]:
             a.setEnabled(in_anno)
 
@@ -578,7 +600,8 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
             self.A_BASE_TEMP, self.A_TIP_TEMP, self.A_CTRL_TEMP, self.A_WIDTH_TEMP, self.A_WIDTH_CTRL_TEMP,
             self.A_LABELS_SAVED, self.A_LABELS_TEMP,
             self.A_LINE_CENTER_CUR, self.A_LINE_WIDTH_CUR,
-            self.A_LINE_CENTER_CACHED, self.A_LINE_WIDTH_CACHED
+            self.A_LINE_CENTER_CACHED, self.A_LINE_WIDTH_CACHED,
+            self.A_MEASURE_LINE, self.A_MEASURE_P1, self.A_MEASURE_P2
         ]:
             self._remove_actor(nm)
 
@@ -613,6 +636,7 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         self._update_labels_saved()
         self._update_labels_temp()
         self._update_lines()
+        self._update_measure_display()
 
         self.plotter.render()
 
@@ -668,6 +692,23 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
 
             # 为了“展示出叶宽的位置”，这里直接计算一次当前 width_path（不 commit）
             self.session.compute()
+            path_idx = getattr(self.session, "width_path_indices", None)
+            if path_idx is not None and len(path_idx) > 0:
+                w1 = getattr(self.session, "width_w1_idx", None)
+                w2 = getattr(self.session, "width_w2_idx", None)
+                ctrl_idx = []
+                seen = set()
+                for idx in path_idx:
+                    i = int(idx)
+                    if i == w1 or i == w2:
+                        continue
+                    if i in seen:
+                        continue
+                    seen.add(i)
+                    ctrl_idx.append(i)
+                self.session.width_ctrl_indices = ctrl_idx
+                self.session.width_ctrl_ids = [10 * (i + 1) for i in range(len(ctrl_idx))]
+                self.session._next_width_ctrl_id = 10 * (len(ctrl_idx) + 1) if len(ctrl_idx) > 0 else 10
 
             self._update_markers_saved()
             self._update_labels_saved()
@@ -751,8 +792,28 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
 
         try:
             self.session.compute_width_path()
+            path_idx = getattr(self.session, "width_path_indices", None)
+            if path_idx is not None and len(path_idx) > 0:
+                w1 = getattr(self.session, "width_w1_idx", None)
+                w2 = getattr(self.session, "width_w2_idx", None)
+                ctrl_idx = []
+                seen = set()
+                for idx in path_idx:
+                    i = int(idx)
+                    if i == w1 or i == w2:
+                        continue
+                    if i in seen:
+                        continue
+                    seen.add(i)
+                    ctrl_idx.append(i)
+                self.session.width_ctrl_indices = ctrl_idx
+                self.session.width_ctrl_ids = [10 * (i + 1) for i in range(len(ctrl_idx))]
+                self.session._next_width_ctrl_id = 10 * (len(ctrl_idx) + 1) if len(ctrl_idx) > 0 else 10
             self._update_lines()
             self.plotter.render()
+            self._update_markers_saved()
+            self._update_labels_saved()
+            self._refresh_point_lists()
             wlen = getattr(self.session, "width_path_length", None)
             if wlen is None:
                 self._update_status("叶宽路径生成完成。")
@@ -763,7 +824,7 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
 
     def on_recommend_length(self):
         """
-        推荐叶长：仅用 B1/T1，在 kNN 图上求最短路径并显示红线。
+        推荐叶长：仅用 B1/T1，在半径图上求最短路径并显示红线。
         """
         if not self.annotating:
             return
@@ -813,10 +874,6 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         layout = QtWidgets.QVBoxLayout(dlg)
 
         form = QtWidgets.QFormLayout()
-        spin_k = QtWidgets.QSpinBox()
-        spin_k.setRange(1, 512)
-        spin_k.setValue(int(self.session.params.k))
-
         spin_step = QtWidgets.QDoubleSpinBox()
         spin_step.setRange(0.0001, 1.0)
         spin_step.setDecimals(6)
@@ -833,14 +890,20 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         spin_min_pts.setRange(1, 100000)
         spin_min_pts.setValue(int(self.session.params.min_slice_pts))
 
-        form.addRow("近邻数 k：", spin_k)
+        spin_graph_r = QtWidgets.QDoubleSpinBox()
+        spin_graph_r.setRange(0.0001, 10.0)
+        spin_graph_r.setDecimals(6)
+        spin_graph_r.setSingleStep(0.001)
+        spin_graph_r.setValue(float(self.session.params.graph_radius))
+
         form.addRow("步长 step：", spin_step)
         form.addRow("半径 radius：", spin_radius)
         form.addRow("最小截面点数 min_slice_pts：", spin_min_pts)
+        form.addRow("连通半径 graph_radius：", spin_graph_r)
         layout.addLayout(form)
 
         tips = QtWidgets.QLabel(
-            "说明：k 越大越连通但更慢；step 越小越细致但更慢；"
+            "说明：graph_radius 越大越连通但更慢；step 越小越细致但更慢；"
             "radius 越大越稳定但可能跨到邻近结构；min_slice_pts 太小易受噪声影响。"
         )
         tips.setWordWrap(True)
@@ -854,10 +917,10 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         if dlg.exec_() != QtWidgets.QDialog.Accepted:
             return False
 
-        self.session.params.k = int(spin_k.value())
         self.session.params.step = float(spin_step.value())
         self.session.params.radius = float(spin_radius.value())
         self.session.params.min_slice_pts = int(spin_min_pts.value())
+        self.session.params.graph_radius = float(spin_graph_r.value())
         self._update_status("已更新叶长推荐参数。")
         return True
 
@@ -1038,6 +1101,25 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         else:
             self._remove_actor(self.A_LABELS_TEMP)
 
+    def _update_measure_display(self):
+        self._remove_actor(self.A_MEASURE_LINE)
+        self._remove_actor(self.A_MEASURE_P1)
+        self._remove_actor(self.A_MEASURE_P2)
+        if self.temp_measure_p1 is None:
+            return
+        self._add_points_actor(self.A_MEASURE_P1, np.asarray([self.temp_measure_p1]), "yellow", 14)
+        if self.temp_measure_p2 is None:
+            return
+        self._add_points_actor(self.A_MEASURE_P2, np.asarray([self.temp_measure_p2]), "yellow", 14)
+        self._add_polyline_actor(
+            self.A_MEASURE_LINE,
+            np.asarray([self.temp_measure_p1, self.temp_measure_p2]),
+            "yellow",
+            3
+        )
+        dist = float(np.linalg.norm(self.temp_measure_p2 - self.temp_measure_p1))
+        self._update_status(f"测距结果：{dist:.6f}")
+
     # ----------------------------
     # lines
     # ----------------------------
@@ -1155,6 +1237,10 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         elif mode == self.MODE_WIDTH_CTRL:
             self.temp_width_ctrl_indices = []
             self.btn_toggle_width_ctrl.setText("叶宽控制点选择：开启")
+        elif mode == self.MODE_MEASURE:
+            self.temp_measure_p1 = None
+            self.temp_measure_p2 = None
+            self.btn_toggle_measure.setText("测距：开启")
 
         self._update_markers_temp()
         self._update_labels_temp()
@@ -1164,6 +1250,8 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
             self._update_status("叶宽点选择：Shift+左键依次选择 W1/W2；关闭后保存。")
         elif mode == self.MODE_WIDTH_CTRL:
             self._update_status("叶宽控制点：Shift+左键添加；关闭后保存。")
+        elif mode == self.MODE_MEASURE:
+            self._update_status("测距：Shift+左键选择两个点，显示连线与距离。")
         else:
             self._update_status("提示：Shift+左键选点；再次点击按钮关闭并保存。")
 
@@ -1194,10 +1282,16 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
             self.temp_w2_idx = None
         elif self.pick_mode == self.MODE_WIDTH_CTRL:
             self.temp_width_ctrl_indices = []
+        elif self.pick_mode == self.MODE_MEASURE:
+            self.temp_measure_p1 = None
+            self.temp_measure_p2 = None
 
         self.pick_mode = self.MODE_NONE
 
-        for b in [self.btn_toggle_base, self.btn_toggle_tip, self.btn_toggle_ctrl, self.btn_toggle_width, self.btn_toggle_width_ctrl]:
+        for b in [
+            self.btn_toggle_base, self.btn_toggle_tip, self.btn_toggle_ctrl,
+            self.btn_toggle_width, self.btn_toggle_width_ctrl, self.btn_toggle_measure
+        ]:
             b.blockSignals(True)
             b.setChecked(False)
             b.blockSignals(False)
@@ -1207,12 +1301,14 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         self.btn_toggle_ctrl.setText("控制点选择：关闭")
         self.btn_toggle_width.setText("叶宽点选择：关闭 (W1/W2)")
         self.btn_toggle_width_ctrl.setText("叶宽控制点选择：关闭")
+        self.btn_toggle_measure.setText("测距：关闭")
 
         self._update_markers_saved()
         self._update_markers_temp()
         self._update_labels_saved()
         self._update_labels_temp()
         self._update_lines()
+        self._update_measure_display()
         self.plotter.render()
 
         self._refresh_point_lists()
@@ -1283,6 +1379,17 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
                 self._invalidate_results_after_point_change()
                 self._update_status("叶宽控制点选择关闭：已保存。")
 
+    def on_toggle_measure(self, checked: bool):
+        if not self.annotating:
+            return
+        if checked:
+            self._close_other_toggles(except_mode=self.MODE_MEASURE)
+            self._enter_mode(self.MODE_MEASURE)
+        else:
+            if self.pick_mode == self.MODE_MEASURE:
+                self._exit_current_mode(commit=False)
+                self._update_status("测距已关闭。")
+
     def _close_other_toggles(self, except_mode: str):
         mapping = {
             self.MODE_BASE: self.btn_toggle_base,
@@ -1290,6 +1397,7 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
             self.MODE_CTRL: self.btn_toggle_ctrl,
             self.MODE_WIDTH: self.btn_toggle_width,
             self.MODE_WIDTH_CTRL: self.btn_toggle_width_ctrl,
+            self.MODE_MEASURE: self.btn_toggle_measure,
         }
         for mode, btn in mapping.items():
             if mode == except_mode:
@@ -1325,6 +1433,15 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
                 self.temp_w2_idx = idx
         elif self.pick_mode == self.MODE_WIDTH_CTRL:
             self.temp_width_ctrl_indices.append(idx)
+        elif self.pick_mode == self.MODE_MEASURE:
+            if self.temp_measure_p1 is None:
+                self.temp_measure_p1 = p.copy()
+            elif self.temp_measure_p2 is None:
+                self.temp_measure_p2 = p.copy()
+            else:
+                self.temp_measure_p1 = p.copy()
+                self.temp_measure_p2 = None
+            self._update_measure_display()
 
         self._update_markers_temp()
         self._update_labels_temp()
@@ -1347,8 +1464,11 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         act_rename = menu.addAction("修改顺序")
         action = menu.exec_(self.list_ctrl.mapToGlobal(pos))
         if action == act_delete:
-            self.on_delete_ctrl()
+            self._delete_selected_ctrl_items()
         elif action == act_rename:
+            if len(self.list_ctrl.selectedItems()) > 1:
+                QMessageBox.information(self, "提示", "修改顺序仅支持单个控制点。")
+                return
             self.on_rename_ctrl()
 
     def on_width_ctrl_context_menu(self, pos):
@@ -1365,9 +1485,92 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
         act_rename = menu.addAction("修改顺序")
         action = menu.exec_(self.list_width_ctrl.mapToGlobal(pos))
         if action == act_delete:
-            self.on_delete_width_ctrl()
+            self._delete_selected_width_ctrl_items()
         elif action == act_rename:
+            if len(self.list_width_ctrl.selectedItems()) > 1:
+                QMessageBox.information(self, "提示", "修改顺序仅支持单个控制点。")
+                return
             self.on_rename_width_ctrl()
+
+    def on_base_context_menu(self, pos):
+        it = self.list_base.itemAt(pos)
+        if it is None:
+            return
+        self.list_base.setCurrentItem(it)
+        menu = QtWidgets.QMenu(self)
+        act_delete = menu.addAction("删除")
+        action = menu.exec_(self.list_base.mapToGlobal(pos))
+        if action == act_delete:
+            self.on_delete_base()
+
+    def on_tip_context_menu(self, pos):
+        it = self.list_tip.itemAt(pos)
+        if it is None:
+            return
+        self.list_tip.setCurrentItem(it)
+        menu = QtWidgets.QMenu(self)
+        act_delete = menu.addAction("删除")
+        action = menu.exec_(self.list_tip.mapToGlobal(pos))
+        if action == act_delete:
+            self.on_delete_tip()
+
+    def on_width_context_menu(self, pos):
+        it = self.list_width.itemAt(pos)
+        if it is None:
+            return
+        self.list_width.setCurrentItem(it)
+        menu = QtWidgets.QMenu(self)
+        act_delete = menu.addAction("删除")
+        action = menu.exec_(self.list_width.mapToGlobal(pos))
+        if action == act_delete:
+            self.on_delete_width()
+
+    def _delete_selected_ctrl_items(self):
+        ctrl_items = self.list_ctrl.selectedItems()
+        if not ctrl_items:
+            return
+        indices = []
+        for it in ctrl_items:
+            info = it.data(0x0100)
+            if info and info[0] == "ctrl":
+                indices.append(int(info[1]))
+        if not indices:
+            return
+        for idx in sorted(set(indices), reverse=True):
+            if 0 <= idx < len(self.session.ctrl_indices):
+                self.session.ctrl_indices.pop(idx)
+                if idx < len(self.session.ctrl_ids):
+                    self.session.ctrl_ids.pop(idx)
+        self._invalidate_results_after_point_change()
+        self._update_markers_saved()
+        self._update_labels_saved()
+        self.plotter.render()
+        self._refresh_point_lists()
+        self._maybe_recommend_width_and_refresh()
+        self._update_status("已删除选中的叶长控制点。")
+
+    def _delete_selected_width_ctrl_items(self):
+        wctrl_items = self.list_width_ctrl.selectedItems()
+        if not wctrl_items:
+            return
+        indices = []
+        for it in wctrl_items:
+            info = it.data(0x0100)
+            if info and info[0] == "wctrl":
+                indices.append(int(info[1]))
+        if not indices:
+            return
+        for idx in sorted(set(indices), reverse=True):
+            if 0 <= idx < len(self.session.width_ctrl_indices):
+                self.session.width_ctrl_indices.pop(idx)
+                if idx < len(self.session.width_ctrl_ids):
+                    self.session.width_ctrl_ids.pop(idx)
+        self._invalidate_results_after_point_change()
+        self._update_markers_saved()
+        self._update_labels_saved()
+        self.plotter.render()
+        self._refresh_point_lists()
+        self._update_status("已删除选中的叶宽控制点。")
 
     def on_delete_selected(self):
         if self.list_base.currentItem() is not None:
@@ -1378,48 +1581,15 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow):
             return
         ctrl_items = self.list_ctrl.selectedItems()
         if ctrl_items:
-            indices = []
-            for it in ctrl_items:
-                info = it.data(0x0100)
-                if info and info[0] == "ctrl":
-                    indices.append(int(info[1]))
-            if indices:
-                for idx in sorted(set(indices), reverse=True):
-                    if 0 <= idx < len(self.session.ctrl_indices):
-                        self.session.ctrl_indices.pop(idx)
-                        if idx < len(self.session.ctrl_ids):
-                            self.session.ctrl_ids.pop(idx)
-                self._invalidate_results_after_point_change()
-                self._update_markers_saved()
-                self._update_labels_saved()
-                self.plotter.render()
-                self._refresh_point_lists()
-                self._maybe_recommend_width_and_refresh()
-                self._update_status("已删除选中的叶长控制点。")
-                return
+            self._delete_selected_ctrl_items()
+            return
         if self.list_width.currentItem() is not None:
             self.on_delete_width()
             return
         wctrl_items = self.list_width_ctrl.selectedItems()
         if wctrl_items:
-            indices = []
-            for it in wctrl_items:
-                info = it.data(0x0100)
-                if info and info[0] == "wctrl":
-                    indices.append(int(info[1]))
-            if indices:
-                for idx in sorted(set(indices), reverse=True):
-                    if 0 <= idx < len(self.session.width_ctrl_indices):
-                        self.session.width_ctrl_indices.pop(idx)
-                        if idx < len(self.session.width_ctrl_ids):
-                            self.session.width_ctrl_ids.pop(idx)
-                self._invalidate_results_after_point_change()
-                self._update_markers_saved()
-                self._update_labels_saved()
-                self.plotter.render()
-                self._refresh_point_lists()
-                self._update_status("已删除选中的叶宽控制点。")
-                return
+            self._delete_selected_width_ctrl_items()
+            return
         QMessageBox.information(self, "提示", "请先在左侧列表中选择要删除的标记。")
 
     def on_delete_base(self):
