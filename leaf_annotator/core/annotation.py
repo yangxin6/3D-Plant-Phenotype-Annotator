@@ -28,6 +28,12 @@ class AnnotationParams:
     slab_half: float = 0.01
     radius: float = 0.01
     min_slice_pts: int = 60
+    stem_diameter_segments: int = 0
+    stem_length_segments: int = 0
+    stem_segments: int = 0  # 旧字段，兼容单一分段数
+    stem_step: float = 0.01  # 旧字段，兼容 step
+    stem_diameter_percentile: float = 95.0
+    stem_length_percentile: float = 95.0
 
 
 def _polyline_length(P: Optional[np.ndarray]) -> Optional[float]:
@@ -56,6 +62,26 @@ def _resample_polyline_step(P: np.ndarray, step: float) -> np.ndarray:
         t = 0.0 if abs(denom) < 1e-12 else (sn - s[j]) / denom
         out.append((1 - t) * P[j] + t * P[j + 1])
     return np.array(out)
+
+
+def _smooth_polyline_window(P: Optional[np.ndarray], win: int) -> Optional[np.ndarray]:
+    if P is None:
+        return None
+    P = np.asarray(P, dtype=np.float64)
+    if len(P) < 2:
+        return P.copy()
+    w = max(3, int(win) | 1)
+    if len(P) < w:
+        return P.copy()
+    out = P.copy()
+    half = w // 2
+    for i in range(len(P)):
+        a = max(0, i - half)
+        b = min(len(P), i + half + 1)
+        out[i] = P[a:b].mean(axis=0)
+    out[0] = P[0]
+    out[-1] = P[-1]
+    return out
 
 
 def _build_knn_graph(points: np.ndarray, k: int) -> csr_matrix:
@@ -150,6 +176,8 @@ class LeafAnnotationSession:
 
         self.file_path: Optional[str] = None
         self.cloud: Optional[ParsedCloud] = None
+        self.plant_type: str = "玉米"
+        self.semantic_map: Dict[str, Optional[int]] = {"leaf": None, "stem": None, "flower": None, "fruit": None}
 
         self.current_inst_id: Optional[int] = None
         self.leaf_pts: Optional[np.ndarray] = None
@@ -217,6 +245,19 @@ class LeafAnnotationSession:
     def load_annotations_json(self, path: str):
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
+        if "plant_type" in data:
+            self.plant_type = str(data.get("plant_type") or self.plant_type)
+        if "semantic_map" in data and isinstance(data["semantic_map"], dict):
+            for k in ["leaf", "stem", "flower", "fruit"]:
+                if k in data["semantic_map"]:
+                    v = data["semantic_map"].get(k)
+                    if v is None:
+                        self.semantic_map[k] = None
+                    else:
+                        vv = int(v)
+                        self.semantic_map[k] = None if vv < 0 else vv
+        if "params" in data and isinstance(data["params"], dict):
+            self._apply_params_from_dict(data["params"])
         ann_list = data.get("annotations", [])
         self.annotations = {}
         self.instance_meta = {}
@@ -230,6 +271,56 @@ class LeafAnnotationSession:
                 meta["label_desc"] = str(ann.get("label_desc") or "")
             if meta:
                 self.instance_meta[inst_id] = meta
+
+    def _apply_params_from_dict(self, params: Dict[str, Any]):
+        if not isinstance(params, dict):
+            return
+        for key, value in params.items():
+            if not hasattr(self.params, key):
+                continue
+            current = getattr(self.params, key)
+            try:
+                if isinstance(current, bool):
+                    casted = bool(value)
+                elif isinstance(current, int) and not isinstance(current, bool):
+                    casted = int(value)
+                elif isinstance(current, float):
+                    casted = float(value)
+                else:
+                    casted = value
+            except Exception:
+                casted = value
+            setattr(self.params, key, casted)
+
+        if "stem_diameter_step" in params or "stem_length_step" in params:
+            if "stem_step" not in params:
+                legacy_src = params.get("stem_diameter_step", params.get("stem_length_step"))
+                try:
+                    legacy = float(legacy_src)
+                except Exception:
+                    legacy = None
+                if legacy is not None:
+                    self.params.stem_step = legacy
+        if "stem_segments" in params:
+            try:
+                legacy = int(params["stem_segments"])
+            except Exception:
+                legacy = None
+            if legacy is not None and legacy > 0:
+                if "stem_diameter_segments" not in params:
+                    self.params.stem_diameter_segments = legacy
+                if "stem_length_segments" not in params:
+                    self.params.stem_length_segments = legacy
+        if "stem_percentile" in params:
+            try:
+                legacy = float(params["stem_percentile"])
+            except Exception:
+                legacy = None
+            if legacy is not None:
+                if "stem_diameter_percentile" not in params:
+                    self.params.stem_diameter_percentile = legacy
+                if "stem_length_percentile" not in params:
+                    self.params.stem_length_percentile = legacy
 
     def has_rgb(self) -> bool:
         return (self.cloud is not None) and (self.cloud.rgb is not None)
@@ -249,6 +340,484 @@ class LeafAnnotationSession:
     def get_full_inst(self) -> np.ndarray:
         self._require_cloud()
         return self.cloud.inst
+
+    def get_instance_points(self, inst_id: int) -> np.ndarray:
+        self._require_cloud()
+        mask = (self.cloud.inst == int(inst_id))
+        return self.cloud.xyz[mask]
+
+    def _get_instance_sem_map(self) -> Dict[int, int]:
+        self._require_cloud()
+        inst = self.cloud.inst
+        sem = self.cloud.sem
+        mask = inst >= 0
+        inst = inst[mask]
+        sem = sem[mask]
+        out: Dict[int, int] = {}
+        for inst_id in np.unique(inst):
+            vals = sem[inst == inst_id]
+            if len(vals) == 0:
+                continue
+            uvals, counts = np.unique(vals, return_counts=True)
+            out[int(inst_id)] = int(uvals[int(np.argmax(counts))])
+        return out
+
+    def _ensure_annotation_entry(self, inst_id: int) -> Dict[str, Any]:
+        inst_id = int(inst_id)
+        ann = self.annotations.get(inst_id)
+        if ann is None:
+            ann = {"inst_id": inst_id}
+            self.annotations[inst_id] = ann
+        return ann
+
+    def _resolve_stem_segments(self, full_height: float, segments: Optional[int]) -> int:
+        seg = 0
+        if segments is not None:
+            try:
+                seg = int(segments)
+            except Exception:
+                seg = 0
+        if seg > 0:
+            return seg
+        step = getattr(self.params, "stem_step", None)
+        if step is not None:
+            try:
+                step = float(step)
+            except Exception:
+                step = None
+        if step is not None and step > 0.0 and full_height > 0.0:
+            return max(1, int(np.ceil(full_height / step)))
+        return 1
+
+    def _get_stem_diameter_percentile(self) -> float:
+        pct = getattr(self.params, "stem_diameter_percentile", None)
+        if pct is None:
+            pct = getattr(self.params, "stem_percentile", 95.0)
+        return float(pct)
+
+    def _get_stem_length_percentile(self) -> float:
+        pct = getattr(self.params, "stem_length_percentile", None)
+        if pct is None:
+            pct = getattr(self.params, "stem_percentile", 95.0)
+        return float(pct)
+
+    def _compute_stem_profile(
+        self,
+        pts: np.ndarray,
+        segments: Optional[int] = None,
+        percentile: Optional[float] = None,
+    ) -> Optional[Dict[str, Any]]:
+        if pts is None or len(pts) < 10:
+            return None
+        mean = pts.mean(axis=0)
+        centered = pts - mean
+        cov = np.cov(centered, rowvar=False)
+        eigvals, eigvecs = np.linalg.eigh(cov)
+        axis = eigvecs[:, int(np.argmax(eigvals))]
+        axis = axis / (np.linalg.norm(axis) + 1e-12)
+
+        t = centered @ axis
+        tmin, tmax = float(t.min()), float(t.max())
+        full_height = max(0.0, tmax - tmin)
+        if percentile is None:
+            percentile = self._get_stem_diameter_percentile()
+        if segments is None:
+            segments = 0
+        try:
+            seg_val = int(segments)
+        except Exception:
+            seg_val = 0
+        if seg_val <= 0:
+            try:
+                seg_val = int(getattr(self.params, "stem_segments", 0))
+            except Exception:
+                seg_val = 0
+        seg_count = self._resolve_stem_segments(full_height, seg_val)
+        pct = float(percentile)
+
+        ref = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        if abs(float(axis[0])) > 0.9:
+            ref = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+        u = np.cross(axis, ref)
+        u = u / (np.linalg.norm(u) + 1e-12)
+        v = np.cross(axis, u)
+
+        def _fit_circle(xs: np.ndarray, ys: np.ndarray) -> Optional[Tuple[float, float, float]]:
+            if len(xs) < 3:
+                return None
+            A = np.column_stack([xs, ys, np.ones_like(xs)])
+            b = -(xs ** 2 + ys ** 2)
+            try:
+                params, *_ = np.linalg.lstsq(A, b, rcond=None)
+                a, bcoef, c = params
+                cx = -a / 2.0
+                cy = -bcoef / 2.0
+                r2 = cx * cx + cy * cy - c
+            except Exception:
+                return None
+            if r2 <= 0:
+                cx = 0.0
+                cy = 0.0
+            d = np.sqrt((xs - cx) ** 2 + (ys - cy) ** 2)
+            radius = float(np.percentile(d, pct))
+            return cx, cy, radius
+
+        edges = np.linspace(tmin, tmax, seg_count + 1) if seg_count > 1 else np.array([tmin, tmax])
+
+        def _build_segments(min_pts: int) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]], float]:
+            segments: List[Dict[str, Any]] = []
+            best_radius = 0.0
+            best_seg: Optional[Dict[str, Any]] = None
+            for i in range(len(edges) - 1):
+                t0 = float(edges[i])
+                t1 = float(edges[i + 1])
+                if t1 <= t0:
+                    continue
+                is_last = (i == len(edges) - 2)
+                mask = (t >= t0) & (t <= t1 if is_last else t < t1)
+                if np.sum(mask) < min_pts:
+                    continue
+                seg_t = t[mask]
+                seg_pts = centered[mask]
+                proj = seg_pts - np.outer(seg_t, axis)
+                xs = proj @ u
+                ys = proj @ v
+                fit = _fit_circle(xs, ys)
+                if fit is None:
+                    radial = np.linalg.norm(proj, axis=1)
+                    if len(radial) < 1:
+                        continue
+                    radius = float(np.percentile(radial, pct))
+                    cx = 0.0
+                    cy = 0.0
+                else:
+                    cx, cy, radius = fit
+                offset = u * cx + v * cy
+                center = mean + axis * (0.5 * (t0 + t1)) + offset
+                center_bottom = mean + axis * t0 + offset
+                center_top = mean + axis * t1 + offset
+                seg = {
+                    "t0": float(t0),
+                    "t1": float(t1),
+                    "center": center.tolist(),
+                    "center_bottom": center_bottom.tolist(),
+                    "center_top": center_top.tolist(),
+                    "radius": float(radius),
+                }
+                segments.append(seg)
+                if radius > best_radius:
+                    best_radius = float(radius)
+                    best_seg = seg
+            return segments, best_seg, best_radius
+
+        segments: List[Dict[str, Any]] = []
+        best_seg: Optional[Dict[str, Any]] = None
+
+        if full_height <= 1e-9 or seg_count <= 1:
+            proj = centered - np.outer(t, axis)
+            xs = proj @ u
+            ys = proj @ v
+            fit = _fit_circle(xs, ys)
+            if fit is None:
+                radial = np.linalg.norm(proj, axis=1)
+                radius = float(np.percentile(radial, pct))
+                cx = 0.0
+                cy = 0.0
+            else:
+                cx, cy, radius = fit
+            t0 = tmin
+            t1 = tmax
+            offset = u * cx + v * cy
+            center = mean + axis * (0.5 * (t0 + t1)) + offset
+            center_bottom = mean + axis * t0 + offset
+            center_top = mean + axis * t1 + offset
+            seg = {
+                "t0": float(t0),
+                "t1": float(t1),
+                "center": center.tolist(),
+                "center_bottom": center_bottom.tolist(),
+                "center_top": center_top.tolist(),
+                "radius": float(radius),
+            }
+            segments.append(seg)
+            best_seg = seg
+        else:
+            segments, best_seg, _ = _build_segments(10)
+            if not segments or best_seg is None:
+                segments, best_seg, _ = _build_segments(3)
+            if not segments or best_seg is None:
+                segments, best_seg, _ = _build_segments(1)
+
+        if not segments or best_seg is None:
+            return None
+
+        segments = sorted(segments, key=lambda s: s["t0"])
+        path_pts = [np.asarray(seg["center_bottom"], dtype=np.float64) for seg in segments]
+        path_pts.append(np.asarray(segments[-1]["center_top"], dtype=np.float64))
+        stem_length = _polyline_length(np.asarray(path_pts, dtype=np.float64))
+
+        best_cyl = {
+            "center": best_seg["center"],
+            "axis": axis.tolist(),
+            "height": float(best_seg["t1"] - best_seg["t0"]),
+            "radius": float(best_seg["radius"]),
+            "diameter": float(best_seg["radius"]) * 2.0,
+        }
+
+        return {
+            "axis": axis.tolist(),
+            "segments": segments,
+            "best": best_cyl,
+            "length_path": [p.tolist() for p in path_pts],
+            "length": float(stem_length if stem_length is not None else 0.0),
+        }
+
+    def _compute_cylinder_from_points(self, pts: np.ndarray) -> Optional[Dict[str, Any]]:
+        prof = self._compute_stem_profile(pts)
+        if prof is None:
+            return None
+        return prof.get("best")
+
+    def _compute_obb_from_points(self, pts: np.ndarray) -> Optional[Dict[str, Any]]:
+        if pts is None or len(pts) < 3:
+            return None
+        mean = pts.mean(axis=0)
+        centered = pts - mean
+        cov = np.cov(centered, rowvar=False)
+        eigvals, eigvecs = np.linalg.eigh(cov)
+        order = np.argsort(eigvals)[::-1]
+        R = eigvecs[:, order]
+        if np.linalg.det(R) < 0:
+            R[:, 2] *= -1
+        local = centered @ R
+        mins = local.min(axis=0)
+        maxs = local.max(axis=0)
+        lengths = (maxs - mins)
+        center_local = (mins + maxs) / 2.0
+        center_world = mean + center_local @ R.T
+        return {
+            "center": center_world.tolist(),
+            "lengths": lengths.tolist(),
+            "rotation": R.tolist(),
+        }
+
+    def compute_semantic_structures(self) -> Dict[str, int]:
+        self._require_cloud()
+        sem_map = self._get_instance_sem_map()
+        stem_label = self.semantic_map.get("stem")
+        flower_label = self.semantic_map.get("flower")
+        fruit_label = self.semantic_map.get("fruit")
+        counts = {"stem": 0, "flower": 0, "fruit": 0}
+        stem_pct = self._get_stem_diameter_percentile()
+        length_pct = self._get_stem_length_percentile()
+        stem_segments = getattr(self.params, "stem_diameter_segments", 0)
+        length_segments = getattr(self.params, "stem_length_segments", 0)
+
+        for inst_id, sem_label in sem_map.items():
+            pts = self.get_instance_points(inst_id)
+            if stem_label is not None and sem_label == int(stem_label):
+                ann = self._ensure_annotation_entry(inst_id)
+                ok = False
+                prof = self._compute_stem_profile(pts, segments=stem_segments, percentile=stem_pct)
+                if prof is not None:
+                    ann["stem_cylinder"] = prof["best"]
+                    ann["stem_diameter"] = prof["best"]["diameter"]
+                    ann["stem_segments"] = prof["segments"]
+                    ok = True
+                prof_len = self._compute_stem_profile(pts, segments=length_segments, percentile=length_pct)
+                if prof_len is not None:
+                    ann["stem_length_path"] = prof_len["length_path"]
+                    ann["stem_length"] = prof_len["length"]
+                    ok = True
+                if ok:
+                    counts["stem"] += 1
+            if flower_label is not None and sem_label == int(flower_label):
+                obb = self._compute_obb_from_points(pts)
+                if obb is not None:
+                    ann = self._ensure_annotation_entry(inst_id)
+                    ann["flower_obb"] = obb
+                    counts["flower"] += 1
+            if fruit_label is not None and sem_label == int(fruit_label):
+                obb = self._compute_obb_from_points(pts)
+                if obb is not None:
+                    ann = self._ensure_annotation_entry(inst_id)
+                    ann["fruit_obb"] = obb
+                    counts["fruit"] += 1
+
+        return counts
+
+    def compute_stem_structures(self) -> int:
+        self._require_cloud()
+        stem_label = self.semantic_map.get("stem")
+        if stem_label is None:
+            return 0
+        sem_map = self._get_instance_sem_map()
+        stem_pct = self._get_stem_diameter_percentile()
+        length_pct = self._get_stem_length_percentile()
+        stem_segments = getattr(self.params, "stem_diameter_segments", 0)
+        length_segments = getattr(self.params, "stem_length_segments", 0)
+        count = 0
+        for inst_id, sem_label in sem_map.items():
+            if int(sem_label) != int(stem_label):
+                continue
+            pts = self.get_instance_points(inst_id)
+            ann = self._ensure_annotation_entry(inst_id)
+            ok = False
+            prof = self._compute_stem_profile(pts, segments=stem_segments, percentile=stem_pct)
+            if prof is not None:
+                ann["stem_cylinder"] = prof["best"]
+                ann["stem_diameter"] = prof["best"]["diameter"]
+                ann["stem_segments"] = prof["segments"]
+                ok = True
+            prof_len = self._compute_stem_profile(pts, segments=length_segments, percentile=length_pct)
+            if prof_len is not None:
+                ann["stem_length_path"] = prof_len["length_path"]
+                ann["stem_length"] = prof_len["length"]
+                ok = True
+            if ok:
+                count += 1
+        return count
+
+    def compute_stem_diameter_structures(self) -> int:
+        self._require_cloud()
+        stem_label = self.semantic_map.get("stem")
+        if stem_label is None:
+            return 0
+        sem_map = self._get_instance_sem_map()
+        stem_pct = self._get_stem_diameter_percentile()
+        stem_segments = getattr(self.params, "stem_diameter_segments", 0)
+        count = 0
+        for inst_id, sem_label in sem_map.items():
+            if int(sem_label) != int(stem_label):
+                continue
+            pts = self.get_instance_points(inst_id)
+            prof = self._compute_stem_profile(pts, segments=stem_segments, percentile=stem_pct)
+            if prof is None:
+                continue
+            ann = self._ensure_annotation_entry(inst_id)
+            ann["stem_cylinder"] = prof["best"]
+            ann["stem_diameter"] = prof["best"]["diameter"]
+            ann["stem_segments"] = prof["segments"]
+            count += 1
+        return count
+
+    def compute_stem_length_structures(self) -> int:
+        self._require_cloud()
+        stem_label = self.semantic_map.get("stem")
+        if stem_label is None:
+            return 0
+        sem_map = self._get_instance_sem_map()
+        length_pct = self._get_stem_length_percentile()
+        length_segments = getattr(self.params, "stem_length_segments", 0)
+        count = 0
+        for inst_id, sem_label in sem_map.items():
+            if int(sem_label) != int(stem_label):
+                continue
+            pts = self.get_instance_points(inst_id)
+            prof = self._compute_stem_profile(pts, segments=length_segments, percentile=length_pct)
+            if prof is None:
+                continue
+            ann = self._ensure_annotation_entry(inst_id)
+            ann["stem_length_path"] = prof["length_path"]
+            ann["stem_length"] = prof["length"]
+            count += 1
+        return count
+
+    def compute_flower_fruit_obb(self) -> Dict[str, int]:
+        self._require_cloud()
+        sem_map = self._get_instance_sem_map()
+        flower_label = self.semantic_map.get("flower")
+        fruit_label = self.semantic_map.get("fruit")
+        counts = {"flower": 0, "fruit": 0}
+        for inst_id, sem_label in sem_map.items():
+            pts = self.get_instance_points(inst_id)
+            if flower_label is not None and int(sem_label) == int(flower_label):
+                obb = self._compute_obb_from_points(pts)
+                if obb is not None:
+                    ann = self._ensure_annotation_entry(inst_id)
+                    ann["flower_obb"] = obb
+                    ann["flower_dims"] = self._obb_dims_from_lengths(obb.get("lengths"))
+                    counts["flower"] += 1
+            if fruit_label is not None and int(sem_label) == int(fruit_label):
+                obb = self._compute_obb_from_points(pts)
+                if obb is not None:
+                    ann = self._ensure_annotation_entry(inst_id)
+                    ann["fruit_obb"] = obb
+                    ann["fruit_dims"] = self._obb_dims_from_lengths(obb.get("lengths"))
+                    counts["fruit"] += 1
+        return counts
+
+    def _obb_dims_from_lengths(self, lengths) -> Optional[Dict[str, float]]:
+        if lengths is None or len(lengths) != 3:
+            return None
+        vals = sorted([float(x) for x in lengths], reverse=True)
+        return {"length": vals[0], "width": vals[1], "height": vals[2]}
+
+    def compute_stem_diameter_instance(self, inst_id: int) -> bool:
+        self._require_cloud()
+        pts = self.get_instance_points(inst_id)
+        stem_pct = self._get_stem_diameter_percentile()
+        stem_segments = getattr(self.params, "stem_diameter_segments", 0)
+        prof = self._compute_stem_profile(pts, segments=stem_segments, percentile=stem_pct)
+        if prof is None:
+            return False
+        ann = self._ensure_annotation_entry(inst_id)
+        ann["stem_cylinder"] = prof["best"]
+        ann["stem_diameter"] = prof["best"]["diameter"]
+        ann["stem_segments"] = prof["segments"]
+        return True
+
+    def compute_stem_length_instance(self, inst_id: int) -> bool:
+        self._require_cloud()
+        pts = self.get_instance_points(inst_id)
+        length_pct = self._get_stem_length_percentile()
+        length_segments = getattr(self.params, "stem_length_segments", 0)
+        prof = self._compute_stem_profile(pts, segments=length_segments, percentile=length_pct)
+        if prof is None:
+            return False
+        ann = self._ensure_annotation_entry(inst_id)
+        ann["stem_length_path"] = prof["length_path"]
+        ann["stem_length"] = prof["length"]
+        return True
+
+    def compute_stem_instance(self, inst_id: int) -> bool:
+        self._require_cloud()
+        pts = self.get_instance_points(inst_id)
+        stem_pct = self._get_stem_diameter_percentile()
+        length_pct = self._get_stem_length_percentile()
+        stem_segments = getattr(self.params, "stem_diameter_segments", 0)
+        length_segments = getattr(self.params, "stem_length_segments", 0)
+        ann = self._ensure_annotation_entry(inst_id)
+        ok = False
+        prof = self._compute_stem_profile(pts, segments=stem_segments, percentile=stem_pct)
+        if prof is not None:
+            ann["stem_cylinder"] = prof["best"]
+            ann["stem_diameter"] = prof["best"]["diameter"]
+            ann["stem_segments"] = prof["segments"]
+            ok = True
+        prof_len = self._compute_stem_profile(pts, segments=length_segments, percentile=length_pct)
+        if prof_len is not None:
+            ann["stem_length_path"] = prof_len["length_path"]
+            ann["stem_length"] = prof_len["length"]
+            ok = True
+        return ok
+
+    def compute_obb_instance(self, inst_id: int, kind: str) -> bool:
+        self._require_cloud()
+        pts = self.get_instance_points(inst_id)
+        obb = self._compute_obb_from_points(pts)
+        if obb is None:
+            return False
+        ann = self._ensure_annotation_entry(inst_id)
+        if kind == "flower":
+            ann["flower_obb"] = obb
+            ann["flower_dims"] = self._obb_dims_from_lengths(obb.get("lengths"))
+        elif kind == "fruit":
+            ann["fruit_obb"] = obb
+            ann["fruit_dims"] = self._obb_dims_from_lengths(obb.get("lengths"))
+        else:
+            return False
+        return True
 
     def list_instance_ids(self) -> np.ndarray:
         if self.cloud is None:
@@ -693,6 +1262,34 @@ class LeafAnnotationSession:
         self.width_path_length = _polyline_length(path_pts)
         self.width_path_indices = path_idx
 
+    def smooth_leaf_paths(self, win: int) -> Tuple[bool, bool]:
+        self._require_instance()
+        w = max(3, int(win) | 1)
+        updated_len = False
+        updated_wid = False
+
+        if self.centerline_result is not None and getattr(self.centerline_result, "smooth_points", None) is not None:
+            smoothed = _smooth_polyline_window(self.centerline_result.smooth_points, w)
+            if smoothed is not None and len(smoothed) >= 2:
+                self.centerline_result.smooth_points = smoothed
+                L = _polyline_length(smoothed)
+                self.centerline_result.length = float(L if L is not None else 0.0)
+                updated_len = True
+
+        if self.width_path_points is not None:
+            smoothed = _smooth_polyline_window(self.width_path_points, w)
+            if smoothed is not None and len(smoothed) >= 2:
+                self.width_path_points = smoothed
+                self.width_path_length = _polyline_length(smoothed)
+                self.width_path_indices = None
+                updated_wid = True
+
+        if updated_len or updated_wid:
+            if self.centerline_result is not None and self.width_path_points is not None:
+                self.point_labels = self.compute_point_labels(self.params.label_radius)
+
+        return updated_len, updated_wid
+
     def compute_point_labels(self, radius: float = 0.01) -> Optional[np.ndarray]:
         if self.leaf_pts is None:
             return None
@@ -914,7 +1511,8 @@ class LeafAnnotationSession:
             "w2_global": None if self.width_w2_idx is None else ds_to_global(self.width_w2_idx),
         }
 
-        ann: Dict[str, Any] = {
+        ann: Dict[str, Any] = dict(prev)
+        ann.update({
             "inst_id": inst_id,
             "picked": picked,
             "ctrl_ids": self.ctrl_ids,
@@ -923,7 +1521,7 @@ class LeafAnnotationSession:
             "width_path_length": None if self.width_path_length is None else float(self.width_path_length),
             "remark": remark,
             "label_desc": label_desc,
-        }
+        })
         if self.centerline_result is not None:
             ann["centerline"] = self.centerline_result.smooth_points.tolist()
             ann["length"] = float(self.centerline_result.length)
@@ -948,8 +1546,19 @@ class LeafAnnotationSession:
         if len(ann_list) == 0:
             raise RuntimeError("当前文件还没有任何实例被标注。")
 
+        semantic_map = {}
+        semantic_label_names = {}
+        for k in ["leaf", "stem", "flower", "fruit"]:
+            v = self.semantic_map.get(k)
+            semantic_map[k] = -1 if v is None else int(v)
+            if v is not None:
+                semantic_label_names[str(int(v))] = k
+
         out = {
             "input": self.file_path,
+            "plant_type": self.plant_type,
+            "semantic_map": semantic_map,
+            "semantic_label_names": semantic_label_names,
             "schema": {
                 "xyz": ":3",
                 "sem_col": self.schema.sem_col,
