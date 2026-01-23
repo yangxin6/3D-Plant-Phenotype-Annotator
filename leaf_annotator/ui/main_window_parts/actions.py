@@ -3,6 +3,7 @@ import os
 
 import numpy as np
 from PyQt5 import QtWidgets
+from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QFileDialog, QMessageBox
 
 
@@ -43,65 +44,76 @@ class ActionsMixin:
             return
         self._settings.setValue("last_dir", os.path.dirname(path))
 
+        dlg = None
         try:
+            dlg = self._start_busy_dialog("正在读取点云...")
             self.session.load(path)
+            if dlg is not None:
+                dlg.setLabelText("正在导入标注/标签...")
+                QtWidgets.QApplication.processEvents()
+
+            base = os.path.splitext(os.path.basename(path))[0]
+            data_dir = os.path.dirname(path)
+            export_dir = self._settings.value("export_dir", "", type=str)
+            cand_paths = [os.path.join(data_dir, f"{base}.json")]
+            if export_dir:
+                cand_paths.append(os.path.join(export_dir, f"{base}.json"))
+            loaded_msgs = []
+            for ap in cand_paths:
+                if os.path.isfile(ap):
+                    try:
+                        self.session.load_annotations_json(ap)
+                        loaded_msgs.append(f"已自动导入标注：{os.path.basename(ap)}")
+                    except Exception:
+                        pass
+                    break
+            self._set_plant_type(self.session.plant_type, update_status=False)
+            loaded_msgs.append(f"植物类型：{self.session.plant_type}")
+
+            label_paths = [os.path.join(data_dir, f"{base}_labels.txt")]
+            if export_dir:
+                label_paths.append(os.path.join(export_dir, f"{base}_labels.txt"))
+            for lp in label_paths:
+                if os.path.isfile(lp):
+                    try:
+                        full_labels = np.loadtxt(lp, dtype=np.int64)
+                        if len(full_labels) == len(self.session.get_full_xyz()):
+                            self.session.full_point_labels = full_labels
+                            loaded_msgs.append(f"已自动导入标签：{os.path.basename(lp)}")
+                    except Exception:
+                        pass
+                    break
+
+            if dlg is not None:
+                dlg.setLabelText("正在刷新界面...")
+                QtWidgets.QApplication.processEvents()
+
+            self._refresh_sem_filter_options()
+            self._refresh_instance_list_for_annotation()
+
+            self.annotating = False
+            self.pick_mode = self.MODE_NONE
+            self.temp_base_idx = None
+            self.temp_tip_idx = None
+            self.temp_ctrl_indices = []
+            self.temp_w1_idx = None
+            self.temp_w2_idx = None
+            self.temp_width_ctrl_indices = []
+
+            self._update_buttons()
+            self._refresh_scene()
+            self._refresh_point_lists()
+            self._refresh_instance_meta_ui()
+            self._update_instance_sem_label()
+            self._update_view_legend()
+            self._update_phenotype_table()
+            loaded_msgs.append("浏览模式：可切换 RGB / 语义 / 实例 显示整株。")
+            self._update_status("\n".join(loaded_msgs))
         except Exception as e:
             QMessageBox.critical(self, "读取失败", str(e))
             return
-
-        base = os.path.splitext(os.path.basename(path))[0]
-        data_dir = os.path.dirname(path)
-        export_dir = self._settings.value("export_dir", "", type=str)
-        cand_paths = [os.path.join(data_dir, f"{base}.json")]
-        if export_dir:
-            cand_paths.append(os.path.join(export_dir, f"{base}.json"))
-        loaded_msgs = []
-        for ap in cand_paths:
-            if os.path.isfile(ap):
-                try:
-                    self.session.load_annotations_json(ap)
-                    loaded_msgs.append(f"已自动导入标注：{os.path.basename(ap)}")
-                except Exception:
-                    pass
-                break
-        self._set_plant_type(self.session.plant_type, update_status=False)
-        loaded_msgs.append(f"植物类型：{self.session.plant_type}")
-
-        label_paths = [os.path.join(data_dir, f"{base}_labels.txt")]
-        if export_dir:
-            label_paths.append(os.path.join(export_dir, f"{base}_labels.txt"))
-        for lp in label_paths:
-            if os.path.isfile(lp):
-                try:
-                    full_labels = np.loadtxt(lp, dtype=np.int64)
-                    if len(full_labels) == len(self.session.get_full_xyz()):
-                        self.session.full_point_labels = full_labels
-                        loaded_msgs.append(f"已自动导入标签：{os.path.basename(lp)}")
-                except Exception:
-                    pass
-                break
-
-        self._refresh_sem_filter_options()
-        self._refresh_instance_list_for_annotation()
-
-        self.annotating = False
-        self.pick_mode = self.MODE_NONE
-        self.temp_base_idx = None
-        self.temp_tip_idx = None
-        self.temp_ctrl_indices = []
-        self.temp_w1_idx = None
-        self.temp_w2_idx = None
-        self.temp_width_ctrl_indices = []
-
-        self._update_buttons()
-        self._refresh_scene()
-        self._refresh_point_lists()
-        self._refresh_instance_meta_ui()
-        self._update_instance_sem_label()
-        self._update_view_legend()
-        self._update_phenotype_table()
-        loaded_msgs.append("浏览模式：可切换 RGB / 语义 / 实例 显示整株。")
-        self._update_status("\n".join(loaded_msgs))
+        finally:
+            self._finish_busy_dialog(dlg)
 
 
     def on_start_annotation(self):
@@ -155,7 +167,15 @@ class ActionsMixin:
 
             self._maybe_recommend_width_and_refresh()
         elif key == "stem":
-            self.session.compute_stem_instance(inst_id)
+            dlg = None
+            try:
+                dlg = self._start_busy_dialog("正在计算茎粗/茎长...")
+                self.session.compute_stem_instance(inst_id)
+            except Exception as e:
+                QMessageBox.critical(self, "计算失败", str(e))
+                return
+            finally:
+                self._finish_busy_dialog(dlg)
             self._update_buttons()
             self._refresh_scene()
             self._refresh_point_lists()
@@ -165,7 +185,16 @@ class ActionsMixin:
             self._update_phenotype_table()
             self._update_status(f"茎标注：inst_id={inst_id}，已计算茎粗/茎长。")
         elif key in ["flower", "fruit"]:
-            self.session.compute_obb_instance(inst_id, key)
+            dlg = None
+            try:
+                label = "花" if key == "flower" else "果"
+                dlg = self._start_busy_dialog(f"正在计算{label}OBB...")
+                self.session.compute_obb_instance(inst_id, key)
+            except Exception as e:
+                QMessageBox.critical(self, "计算失败", str(e))
+                return
+            finally:
+                self._finish_busy_dialog(dlg)
             self._update_buttons()
             self._refresh_scene()
             self._refresh_point_lists()
@@ -173,7 +202,6 @@ class ActionsMixin:
             self._update_instance_sem_label()
             self._update_view_legend()
             self._update_phenotype_table()
-            label = "花" if key == "flower" else "果"
             self._update_status(f"{label}标注：inst_id={inst_id}，已计算{label}OBB。")
 
 
@@ -239,7 +267,12 @@ class ActionsMixin:
 
                 self._maybe_recommend_width_and_refresh()
             elif key == "stem":
-                self.session.compute_stem_instance(inst_id)
+                dlg = None
+                try:
+                    dlg = self._start_busy_dialog("正在计算茎粗/茎长...")
+                    self.session.compute_stem_instance(inst_id)
+                finally:
+                    self._finish_busy_dialog(dlg)
                 self._update_buttons()
                 self._refresh_scene()
                 self._refresh_point_lists()
@@ -249,7 +282,13 @@ class ActionsMixin:
                 self._update_phenotype_table()
                 self._update_status(f"茎标注：inst_id={inst_id}，已更新茎粗/茎长。")
             elif key in ["flower", "fruit"]:
-                self.session.compute_obb_instance(inst_id, key)
+                dlg = None
+                label = "花" if key == "flower" else "果"
+                try:
+                    dlg = self._start_busy_dialog(f"正在计算{label}OBB...")
+                    self.session.compute_obb_instance(inst_id, key)
+                finally:
+                    self._finish_busy_dialog(dlg)
                 self._update_buttons()
                 self._refresh_scene()
                 self._refresh_point_lists()
@@ -257,7 +296,6 @@ class ActionsMixin:
                 self._update_instance_sem_label()
                 self._update_view_legend()
                 self._update_phenotype_table()
-                label = "花" if key == "flower" else "果"
                 self._update_status(f"{label}标注：inst_id={inst_id}，已更新{label}OBB。")
 
         except Exception as e:
@@ -309,19 +347,23 @@ class ActionsMixin:
     def on_export_phenotype_csv(self):
         if self.session.cloud is None:
             return
-        export_dir = self._settings.value("export_dir", "", type=str)
-        if not export_dir:
-            export_dir = QFileDialog.getExistingDirectory(
-                self, "选择表型导出目录", self._settings.value("last_dir", "", type=str)
-            )
-            if not export_dir:
-                return
-            self._settings.setValue("export_dir", export_dir)
+        last_dir = self._settings.value("phenotype_export_dir", "", type=str)
+        if not last_dir:
+            last_dir = self._settings.value("last_dir", "", type=str)
 
         base = "plant_annotations"
         if self.session.file_path:
             base = os.path.splitext(os.path.basename(self.session.file_path))[0]
-        out_path = os.path.join(export_dir, f"{base}_phenotype.csv")
+        default_name = f"{base}_phenotype.csv"
+        out_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "导出表型 CSV",
+            os.path.join(last_dir, default_name),
+            "CSV (*.csv);;All (*.*)"
+        )
+        if not out_path:
+            return
+        self._settings.setValue("phenotype_export_dir", os.path.dirname(out_path))
 
         try:
             self.session.export_phenotype_csv(out_path)
@@ -348,7 +390,15 @@ class ActionsMixin:
         if self.session.width_path_points is None:
             QMessageBox.information(self, "提示", "请先生成叶宽路径或加载已有结果。")
             return
-        self.session.point_labels = self.session.compute_point_labels(self.session.params.label_radius)
+        dlg = None
+        try:
+            dlg = self._start_busy_dialog("正在生成标注标签...")
+            self.session.point_labels = self.session.compute_point_labels(self.session.params.label_radius)
+        except Exception as e:
+            QMessageBox.critical(self, "生成标签失败", str(e))
+            return
+        finally:
+            self._finish_busy_dialog(dlg)
         if self.session.point_labels is None:
             QMessageBox.information(self, "提示", "当前无法生成标签，请先生成叶长和叶宽路径。")
             return
@@ -366,11 +416,15 @@ class ActionsMixin:
             return
         if not self.on_stem_diameter_params_dialog():
             return
+        dlg = None
         try:
+            dlg = self._start_busy_dialog("正在计算茎粗...")
             count = self.session.compute_stem_diameter_structures()
         except Exception as e:
             QMessageBox.critical(self, "计算失败", str(e))
             return
+        finally:
+            self._finish_busy_dialog(dlg)
         if self.btn_toggle_stem_cyl.isChecked():
             self._update_stem_cylinders()
             self.plotter.render()
@@ -388,11 +442,15 @@ class ActionsMixin:
             return
         if not self.on_stem_length_params_dialog():
             return
+        dlg = None
         try:
+            dlg = self._start_busy_dialog("正在计算茎长...")
             count = self.session.compute_stem_length_structures()
         except Exception as e:
             QMessageBox.critical(self, "计算失败", str(e))
             return
+        finally:
+            self._finish_busy_dialog(dlg)
         if hasattr(self, "btn_toggle_stem_path") and self.btn_toggle_stem_path.isChecked():
             self._update_stem_length_paths()
             self.plotter.render()
@@ -480,11 +538,15 @@ class ActionsMixin:
         if self.session.semantic_map.get("flower") is None and self.session.semantic_map.get("fruit") is None:
             QMessageBox.information(self, "提示", "请先选择花/果语义标签。")
             return
+        dlg = None
         try:
+            dlg = self._start_busy_dialog("正在计算花/果 OBB...")
             counts = self.session.compute_flower_fruit_obb()
         except Exception as e:
             QMessageBox.critical(self, "计算失败", str(e))
             return
+        finally:
+            self._finish_busy_dialog(dlg)
         self._update_phenotype_table()
         msg = f"已计算：花 {counts['flower']} 个，果 {counts['fruit']} 个。"
         QMessageBox.information(self, "完成", msg)
@@ -497,7 +559,15 @@ class ActionsMixin:
             QMessageBox.information(self, "提示", "当前文件还没有任何实例被标注。")
             return
         if self.session.centerline_result is not None and self.session.width_path_points is not None:
-            self.session.point_labels = self.session.compute_point_labels(self.session.params.label_radius)
+            dlg = None
+            try:
+                dlg = self._start_busy_dialog("正在生成标注标签...")
+                self.session.point_labels = self.session.compute_point_labels(self.session.params.label_radius)
+            except Exception as e:
+                QMessageBox.critical(self, "生成标签失败", str(e))
+                return
+            finally:
+                self._finish_busy_dialog(dlg)
         if (
             self.session.current_inst_id is not None
             and (
@@ -529,14 +599,30 @@ class ActionsMixin:
 
 
     def on_show_help(self):
-        QMessageBox.information(
-            self,
-            "快捷键/说明",
-            "拾取：Shift + 左键\n"
-            "切换：先开启对应拾取模式再点击点云\n"
-            "叶宽：W1/W2 为端点，WC 为叶宽控制点\n"
-            "保存标注：Ctrl + S",
+        text = (
+            "<div style='font-size:12pt; line-height:1.5;'>"
+            "<b>基础流程</b><br>"
+            "读取点云 → 选择语义标签 → 选择实例 → 点击标注进入<br><br>"
+            "<b>叶子标注</b><br>"
+            "Shift+左键拾取 叶基/叶尖/叶宽端点/控制点<br>"
+            "可用功能：生成叶长/叶宽/面积，推荐叶宽，平滑曲线，计算叶倾角/叶夹角<br><br>"
+            "<b>茎/花/果</b><br>"
+            "茎：计算茎粗/茎长，可显示圆柱与茎长路径<br>"
+            "花/果：计算 OBB，并显示边长<br><br>"
+            "<b>视图与显示</b><br>"
+            "视图：正/侧/顶视图；显示 AABB/OBB；选择视图中心会显示黑色标记点<br>"
+            "显示模式：RGB / 语义 / 实例 / 表型标签 视图切换<br><br>"
+            "<b>导出与快捷键</b><br>"
+            "保存标注：Ctrl + S；导出表型 CSV；导出标注点云<br>"
+            "提示：先开启对应拾取模式再点击点云"
+            "</div>"
         )
+        dlg = QMessageBox(self)
+        dlg.setWindowTitle("使用说明")
+        dlg.setIcon(QMessageBox.Information)
+        dlg.setTextFormat(Qt.RichText)
+        dlg.setText(text)
+        dlg.exec_()
 
 
     def on_show_about(self):
@@ -544,7 +630,7 @@ class ActionsMixin:
             self,
             "关于",
             "版本：v0.1.0\n"
-            "开发人：杨鑫\n"
+            "开发人：杨鑫,苗腾\n"
             "邮件：yangxinnc@163.com\n"
             "单位：沈阳农业大学 信息与电气工程学院",
         )

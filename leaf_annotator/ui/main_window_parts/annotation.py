@@ -314,6 +314,7 @@ class AnnotationMixin:
         if (not self.annotating) or self.annotate_semantic != "leaf":
             QMessageBox.information(self, "提示", "请在叶子标注模式下计算叶倾角。")
             return
+        dlg = None
         try:
             params = self._open_leaf_inclination_params_dialog()
             if params is None:
@@ -321,6 +322,7 @@ class AnnotationMixin:
             ratio, radius = params
             self.session.params.leaf_inclination_ratio = float(ratio)
             self.session.params.leaf_inclination_radius = float(radius)
+            dlg = self._start_busy_dialog("正在计算叶倾角...")
             angle = self.session.compute_leaf_inclination_instance(ratio=ratio, radius=radius)
             if angle is None:
                 QMessageBox.information(self, "提示", "当前无法计算叶倾角，请先生成叶长并检查点云。")
@@ -331,16 +333,20 @@ class AnnotationMixin:
             self.plotter.render()
         except Exception as e:
             QMessageBox.critical(self, "计算失败", str(e))
+        finally:
+            self._finish_busy_dialog(dlg)
 
     def on_compute_leaf_stem_angle(self):
         if (not self.annotating) or self.annotate_semantic != "leaf":
             QMessageBox.information(self, "提示", "请在叶子标注模式下计算叶夹角。")
             return
+        dlg = None
         try:
             ratio = self._open_leaf_stem_angle_params_dialog()
             if ratio is None:
                 return
             self.session.params.leaf_stem_ratio = float(ratio)
+            dlg = self._start_busy_dialog("正在计算叶夹角...")
             angle = self.session.compute_leaf_stem_angle_instance(ratio=ratio)
             if angle is None:
                 QMessageBox.information(self, "提示", "当前无法计算叶夹角，请先计算茎长并确保叶长有效。")
@@ -351,6 +357,8 @@ class AnnotationMixin:
             self.plotter.render()
         except Exception as e:
             QMessageBox.critical(self, "计算失败", str(e))
+        finally:
+            self._finish_busy_dialog(dlg)
 
     def _open_smooth_params_dialog(self) -> Optional[int]:
         value = int(getattr(self.session.params, "smooth_win", 9))
@@ -376,7 +384,15 @@ class AnnotationMixin:
         if win is None:
             return
         self.session.params.smooth_win = int(win)
-        updated_len, updated_wid = self.session.smooth_leaf_paths(win)
+        dlg = None
+        try:
+            dlg = self._start_busy_dialog("正在平滑叶长/叶宽...")
+            updated_len, updated_wid = self.session.smooth_leaf_paths(win)
+        except Exception as e:
+            QMessageBox.critical(self, "平滑失败", str(e))
+            return
+        finally:
+            self._finish_busy_dialog(dlg)
         if not updated_len and not updated_wid:
             QMessageBox.information(self, "提示", "当前没有可平滑的叶长/叶宽路径，请先生成叶长和叶宽。")
             return
