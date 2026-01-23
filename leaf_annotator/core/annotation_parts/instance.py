@@ -1,5 +1,6 @@
 # core/annotation_parts/instance.py
 from typing import List
+from types import SimpleNamespace
 
 import numpy as np
 from scipy.spatial import cKDTree
