@@ -91,6 +91,14 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow, UiStateMixin, SemanticMixin, Sc
     A_OBB_DIM_W = "obb_dim_w"
     A_OBB_DIM_H = "obb_dim_h"
     A_OBB_DIM_LABELS = "obb_dim_labels"
+    A_LEAF_INCLINE_N = "leaf_incline_normal"
+    A_LEAF_INCLINE_Z = "leaf_incline_z"
+    A_LEAF_INCLINE_ARC = "leaf_incline_arc"
+    A_LEAF_INCLINE_LABEL = "leaf_incline_label"
+    A_LEAF_STEM_LEAF = "leaf_stem_leaf"
+    A_LEAF_STEM_STEM = "leaf_stem_stem"
+    A_LEAF_STEM_ARC = "leaf_stem_arc"
+    A_LEAF_STEM_LABEL = "leaf_stem_label"
 
     def __init__(self):
         super().__init__()
@@ -101,6 +109,7 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow, UiStateMixin, SemanticMixin, Sc
         file_menu = menu.addMenu("文件")
         self.act_load = file_menu.addAction("加载点云")
         self.act_export_dir = file_menu.addAction("导出目录")
+        self.act_export_phenotype = file_menu.addAction("导出表型CSV")
         file_menu.addSeparator()
         self.act_quit = file_menu.addAction("退出")
 
@@ -396,6 +405,8 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow, UiStateMixin, SemanticMixin, Sc
         self.table_phenotype.setWordWrap(False)
         self.table_phenotype.setTextElideMode(QtCore.Qt.ElideRight)
         phenotype_layout.addWidget(self.table_phenotype)
+        self.btn_export_phenotype = QtWidgets.QPushButton("导出表型CSV")
+        phenotype_layout.addWidget(self.btn_export_phenotype)
         panel.addWidget(self.phenotype_group)
 
         panel.addStretch(1)
@@ -507,11 +518,13 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow, UiStateMixin, SemanticMixin, Sc
         self.btn_compute_leaf_stem_angle.clicked.connect(self.on_compute_leaf_stem_angle)
 
         self.btn_export.clicked.connect(self.on_save_annotations)
+        self.btn_export_phenotype.clicked.connect(self.on_export_phenotype_csv)
 
         self.text_remark.textChanged.connect(self.on_instance_meta_changed)
         self.combo_label_desc.currentIndexChanged.connect(self.on_instance_meta_changed)
         self.act_load.triggered.connect(self.on_load)
         self.act_export_dir.triggered.connect(self.on_choose_export_dir)
+        self.act_export_phenotype.triggered.connect(self.on_export_phenotype_csv)
         self.act_quit.triggered.connect(self.close)
         self.act_help.triggered.connect(self.on_show_help)
         self.act_about.triggered.connect(self.on_show_about)

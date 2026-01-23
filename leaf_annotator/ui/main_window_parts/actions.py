@@ -306,6 +306,33 @@ class ActionsMixin:
         self._update_buttons()
         self._update_status(f"已导出整株标注：{os.path.basename(out_path)}")
 
+    def on_export_phenotype_csv(self):
+        if self.session.cloud is None:
+            return
+        export_dir = self._settings.value("export_dir", "", type=str)
+        if not export_dir:
+            export_dir = QFileDialog.getExistingDirectory(
+                self, "选择表型导出目录", self._settings.value("last_dir", "", type=str)
+            )
+            if not export_dir:
+                return
+            self._settings.setValue("export_dir", export_dir)
+
+        base = "plant_annotations"
+        if self.session.file_path:
+            base = os.path.splitext(os.path.basename(self.session.file_path))[0]
+        out_path = os.path.join(export_dir, f"{base}_phenotype.csv")
+
+        try:
+            self.session.export_phenotype_csv(out_path)
+        except Exception as e:
+            QMessageBox.critical(self, "导出失败", str(e))
+            return
+
+        QMessageBox.information(self, "完成", f"已导出：{out_path}")
+        self._update_buttons()
+        self._update_status(f"已导出表型数据：{os.path.basename(out_path)}")
+
 
     def on_export_labeled_cloud(self):
         radius, ok = QtWidgets.QInputDialog.getDouble(

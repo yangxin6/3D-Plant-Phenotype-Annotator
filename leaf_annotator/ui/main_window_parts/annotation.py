@@ -1,5 +1,5 @@
 # ui/main_window_parts/annotation.py
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 from PyQt5 import QtWidgets
@@ -238,33 +238,119 @@ class AnnotationMixin:
             self._finish_busy_dialog(dlg)
 
 
+    def _open_leaf_inclination_params_dialog(self) -> Optional[Tuple[float, float]]:
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("叶倾角参数")
+        layout = QtWidgets.QVBoxLayout(dlg)
+
+        form = QtWidgets.QFormLayout()
+        spin_ratio = QtWidgets.QDoubleSpinBox()
+        spin_ratio.setRange(0.0, 1.0)
+        spin_ratio.setDecimals(3)
+        spin_ratio.setSingleStep(0.05)
+        spin_ratio.setValue(float(getattr(self.session.params, "leaf_inclination_ratio", 0.5)))
+
+        spin_radius = QtWidgets.QDoubleSpinBox()
+        spin_radius.setRange(0.0, 10.0)
+        spin_radius.setDecimals(4)
+        spin_radius.setSingleStep(0.001)
+        default_radius = getattr(self.session.params, "leaf_inclination_radius", None)
+        if default_radius is None:
+            default_radius = max(
+                float(getattr(self.session.params, "radius", 0.0)),
+                float(getattr(self.session.params, "slab_half", 0.0)),
+                float(getattr(self.session.params, "voxel", 0.0)),
+            )
+        spin_radius.setValue(float(default_radius))
+
+        form.addRow("位置比例(0-1)：", spin_ratio)
+        form.addRow("局部半径(0=整叶)：", spin_radius)
+        layout.addLayout(form)
+
+        tips = QtWidgets.QLabel("说明：位置比例沿叶长从基部到尖端；半径用于局部平面拟合。")
+        tips.setWordWrap(True)
+        layout.addWidget(tips)
+
+        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        layout.addWidget(btns)
+
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return None
+
+        return float(spin_ratio.value()), float(spin_radius.value())
+
+    def _open_leaf_stem_angle_params_dialog(self) -> Optional[float]:
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("叶夹角参数")
+        layout = QtWidgets.QVBoxLayout(dlg)
+
+        form = QtWidgets.QFormLayout()
+        spin_ratio = QtWidgets.QDoubleSpinBox()
+        spin_ratio.setRange(0.0, 1.0)
+        spin_ratio.setDecimals(3)
+        spin_ratio.setSingleStep(0.05)
+        spin_ratio.setValue(float(getattr(self.session.params, "leaf_stem_ratio", 0.1)))
+
+        form.addRow("起始比例(0-1)：", spin_ratio)
+        layout.addLayout(form)
+
+        tips = QtWidgets.QLabel("说明：起始比例用于定义叶长起始段方向。")
+        tips.setWordWrap(True)
+        layout.addWidget(tips)
+
+        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        layout.addWidget(btns)
+
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return None
+
+        return float(spin_ratio.value())
+
     def on_compute_leaf_inclination(self):
         if (not self.annotating) or self.annotate_semantic != "leaf":
-            QMessageBox.information(self, "??", "???????????????")
+            QMessageBox.information(self, "提示", "请在叶子标注模式下计算叶倾角。")
             return
         try:
-            angle = self.session.compute_leaf_inclination_instance()
+            params = self._open_leaf_inclination_params_dialog()
+            if params is None:
+                return
+            ratio, radius = params
+            self.session.params.leaf_inclination_ratio = float(ratio)
+            self.session.params.leaf_inclination_radius = float(radius)
+            angle = self.session.compute_leaf_inclination_instance(ratio=ratio, radius=radius)
             if angle is None:
-                QMessageBox.information(self, "??", "??????????????????????")
+                QMessageBox.information(self, "提示", "当前无法计算叶倾角，请先生成叶长并检查点云。")
                 return
             self._update_phenotype_table()
-            self._update_status(f"???????{angle:.3f}")
+            self._update_status(f"已计算叶倾角：{angle:.1f}")
+            self._update_lines()
+            self.plotter.render()
         except Exception as e:
-            QMessageBox.critical(self, "????", str(e))
+            QMessageBox.critical(self, "计算失败", str(e))
 
     def on_compute_leaf_stem_angle(self):
         if (not self.annotating) or self.annotate_semantic != "leaf":
-            QMessageBox.information(self, "??", "???????????????")
+            QMessageBox.information(self, "提示", "请在叶子标注模式下计算叶夹角。")
             return
         try:
-            angle = self.session.compute_leaf_stem_angle_instance()
+            ratio = self._open_leaf_stem_angle_params_dialog()
+            if ratio is None:
+                return
+            self.session.params.leaf_stem_ratio = float(ratio)
+            angle = self.session.compute_leaf_stem_angle_instance(ratio=ratio)
             if angle is None:
-                QMessageBox.information(self, "??", "????????????????????????")
+                QMessageBox.information(self, "提示", "当前无法计算叶夹角，请先计算茎长并确保叶长有效。")
                 return
             self._update_phenotype_table()
-            self._update_status(f"???????{angle:.3f}")
+            self._update_status(f"已计算叶夹角：{angle:.1f}")
+            self._update_lines()
+            self.plotter.render()
         except Exception as e:
-            QMessageBox.critical(self, "????", str(e))
+            QMessageBox.critical(self, "计算失败", str(e))
 
     def _open_smooth_params_dialog(self) -> Optional[int]:
         value = int(getattr(self.session.params, "smooth_win", 9))

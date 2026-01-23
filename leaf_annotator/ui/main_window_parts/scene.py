@@ -146,7 +146,9 @@ class SceneMixin:
             self.A_LINE_CENTER_CUR, self.A_LINE_WIDTH_CUR,
             self.A_LINE_CENTER_CACHED, self.A_LINE_WIDTH_CACHED,
             self.A_MEASURE_LINE, self.A_MEASURE_P1, self.A_MEASURE_P2,
-            self.A_VIEW_CENTER
+            self.A_VIEW_CENTER,
+            self.A_LEAF_INCLINE_N, self.A_LEAF_INCLINE_Z, self.A_LEAF_INCLINE_ARC, self.A_LEAF_INCLINE_LABEL,
+            self.A_LEAF_STEM_LEAF, self.A_LEAF_STEM_STEM, self.A_LEAF_STEM_ARC, self.A_LEAF_STEM_LABEL,
         ]:
             self._remove_actor(nm)
 
@@ -184,7 +186,9 @@ class SceneMixin:
             self.A_LINE_CENTER_CUR, self.A_LINE_WIDTH_CUR,
             self.A_LINE_CENTER_CACHED, self.A_LINE_WIDTH_CACHED,
             self.A_MEASURE_LINE, self.A_MEASURE_P1, self.A_MEASURE_P2,
-            self.A_VIEW_CENTER, self.A_AABB, self.A_OBB
+            self.A_VIEW_CENTER, self.A_AABB, self.A_OBB,
+            self.A_LEAF_INCLINE_N, self.A_LEAF_INCLINE_Z, self.A_LEAF_INCLINE_ARC, self.A_LEAF_INCLINE_LABEL,
+            self.A_LEAF_STEM_LEAF, self.A_LEAF_STEM_STEM, self.A_LEAF_STEM_ARC, self.A_LEAF_STEM_LABEL,
         ]:
             self._remove_actor(nm)
 
@@ -231,6 +235,8 @@ class SceneMixin:
             self.A_MEASURE_LINE, self.A_MEASURE_P1, self.A_MEASURE_P2,
             self.A_VIEW_CENTER, self.A_AABB, self.A_OBB,
             self.A_OBB_DIM_L, self.A_OBB_DIM_W, self.A_OBB_DIM_H, self.A_OBB_DIM_LABELS,
+            self.A_LEAF_INCLINE_N, self.A_LEAF_INCLINE_Z, self.A_LEAF_INCLINE_ARC, self.A_LEAF_INCLINE_LABEL,
+            self.A_LEAF_STEM_LEAF, self.A_LEAF_STEM_STEM, self.A_LEAF_STEM_ARC, self.A_LEAF_STEM_LABEL,
         ]:
             self._remove_actor(nm)
         self._update_stem_cylinders(inst_ids=[int(inst_id)])
@@ -256,7 +262,9 @@ class SceneMixin:
             self.A_LINE_CENTER_CUR, self.A_LINE_WIDTH_CUR,
             self.A_LINE_CENTER_CACHED, self.A_LINE_WIDTH_CACHED,
             self.A_MEASURE_LINE, self.A_MEASURE_P1, self.A_MEASURE_P2,
-            self.A_VIEW_CENTER, self.A_AABB, self.A_OBB
+            self.A_VIEW_CENTER, self.A_AABB, self.A_OBB,
+            self.A_LEAF_INCLINE_N, self.A_LEAF_INCLINE_Z, self.A_LEAF_INCLINE_ARC, self.A_LEAF_INCLINE_LABEL,
+            self.A_LEAF_STEM_LEAF, self.A_LEAF_STEM_STEM, self.A_LEAF_STEM_ARC, self.A_LEAF_STEM_LABEL,
         ]:
             self._remove_actor(nm)
         self._update_obb_dimension_display()
@@ -512,6 +520,145 @@ class SceneMixin:
         else:
             self._remove_actor(self.A_LINE_CENTER_CACHED)
             self._remove_actor(self.A_LINE_WIDTH_CACHED)
+        self._update_leaf_angle_visuals()
+
+    def _clear_leaf_angle_actors(self):
+        for nm in [
+            self.A_LEAF_INCLINE_N, self.A_LEAF_INCLINE_Z, self.A_LEAF_INCLINE_ARC, self.A_LEAF_INCLINE_LABEL,
+            self.A_LEAF_STEM_LEAF, self.A_LEAF_STEM_STEM, self.A_LEAF_STEM_ARC, self.A_LEAF_STEM_LABEL,
+        ]:
+            self._remove_actor(nm)
+
+    def _leaf_angle_scale(self) -> float:
+        scale = None
+        if self.session.centerline_result is not None:
+            pts = getattr(self.session.centerline_result, "smooth_points", None)
+            if pts is not None and len(pts) >= 2:
+                seg = np.linalg.norm(pts[1:] - pts[:-1], axis=1)
+                length = float(np.sum(seg))
+                if length > 0:
+                    scale = 0.2 * length
+        if scale is None and self.session.leaf_pts is not None and len(self.session.leaf_pts) > 0:
+            pts = np.asarray(self.session.leaf_pts, dtype=np.float64)
+            diag = float(np.linalg.norm(pts.max(axis=0) - pts.min(axis=0)))
+            if diag > 0:
+                scale = 0.2 * diag
+        if scale is None:
+            scale = 0.05
+        return max(scale, 0.02)
+
+    def _update_leaf_angle_visuals(self):
+        if (not self.annotating) or self.annotate_semantic != "leaf":
+            self._clear_leaf_angle_actors()
+            return
+        if self.session.current_inst_id is None:
+            self._clear_leaf_angle_actors()
+            return
+        ann = self.session.annotations.get(int(self.session.current_inst_id))
+        if ann is None:
+            self._clear_leaf_angle_actors()
+            return
+
+        def _norm_vec(vec):
+            if vec is None:
+                return None
+            v = np.asarray(vec, dtype=np.float64)
+            if v.shape != (3,):
+                return None
+            n = float(np.linalg.norm(v))
+            if n <= 1e-12:
+                return None
+            return v / n
+
+        scale = self._leaf_angle_scale()
+
+        inc = ann.get("leaf_inclination_viz")
+        if inc is None:
+            self._remove_actor(self.A_LEAF_INCLINE_N)
+            self._remove_actor(self.A_LEAF_INCLINE_Z)
+            self._remove_actor(self.A_LEAF_INCLINE_ARC)
+            self._remove_actor(self.A_LEAF_INCLINE_LABEL)
+        else:
+            origin = inc.get("origin")
+            origin = np.asarray(origin, dtype=np.float64) if origin is not None else None
+            normal = _norm_vec(inc.get("normal"))
+            z_axis = _norm_vec(inc.get("z_axis") or [0.0, 0.0, 1.0])
+            if origin is None or origin.shape != (3,) or normal is None or z_axis is None:
+                self._remove_actor(self.A_LEAF_INCLINE_N)
+                self._remove_actor(self.A_LEAF_INCLINE_Z)
+                self._remove_actor(self.A_LEAF_INCLINE_ARC)
+                self._remove_actor(self.A_LEAF_INCLINE_LABEL)
+            else:
+                if float(np.dot(normal, z_axis)) < 0:
+                    normal = -normal
+                p_n = origin + normal * scale
+                p_z = origin + z_axis * scale
+                self._add_polyline_actor(self.A_LEAF_INCLINE_N, np.asarray([origin, p_n]), "yellow", 3)
+                self._add_polyline_actor(self.A_LEAF_INCLINE_Z, np.asarray([origin, p_z]), "cyan", 3)
+                dot = float(np.clip(np.dot(normal, z_axis), -1.0, 1.0))
+                angle = float(np.arccos(dot))
+                v = z_axis - dot * normal
+                v_norm = float(np.linalg.norm(v))
+                if angle > 1e-3 and v_norm > 1e-6:
+                    v = v / v_norm
+                    arc_pts = []
+                    for t in np.linspace(0.0, angle, 21):
+                        arc_pts.append(origin + (scale * 0.8) * (np.cos(t) * normal + np.sin(t) * v))
+                    self._add_polyline_actor(self.A_LEAF_INCLINE_ARC, np.asarray(arc_pts), "orange", 3)
+                    mid = angle / 2.0
+                    label_pt = origin + (scale * 0.9) * (np.cos(mid) * normal + np.sin(mid) * v)
+                    label_angle = inc.get("angle", np.degrees(angle))
+                    self._add_labels_actor(self.A_LEAF_INCLINE_LABEL, np.asarray([label_pt]), [f"{float(label_angle):.1f}°"])
+                else:
+                    self._remove_actor(self.A_LEAF_INCLINE_ARC)
+                    self._remove_actor(self.A_LEAF_INCLINE_LABEL)
+
+        leaf_stem = ann.get("leaf_stem_angle_viz")
+        if leaf_stem is None:
+            self._remove_actor(self.A_LEAF_STEM_LEAF)
+            self._remove_actor(self.A_LEAF_STEM_STEM)
+            self._remove_actor(self.A_LEAF_STEM_ARC)
+            self._remove_actor(self.A_LEAF_STEM_LABEL)
+        else:
+            origin = leaf_stem.get("origin")
+            origin = np.asarray(origin, dtype=np.float64) if origin is not None else None
+            leaf_dir = _norm_vec(leaf_stem.get("leaf_dir"))
+            stem_dir = _norm_vec(leaf_stem.get("stem_dir"))
+            if origin is None or origin.shape != (3,) or leaf_dir is None or stem_dir is None:
+                self._remove_actor(self.A_LEAF_STEM_LEAF)
+                self._remove_actor(self.A_LEAF_STEM_STEM)
+                self._remove_actor(self.A_LEAF_STEM_ARC)
+                self._remove_actor(self.A_LEAF_STEM_LABEL)
+            else:
+                self._add_polyline_actor(
+                    self.A_LEAF_STEM_LEAF,
+                    np.asarray([origin, origin + leaf_dir * scale]),
+                    "green",
+                    3
+                )
+                self._add_polyline_actor(
+                    self.A_LEAF_STEM_STEM,
+                    np.asarray([origin, origin + stem_dir * scale]),
+                    "orange",
+                    3
+                )
+                dot = float(np.clip(np.dot(stem_dir, leaf_dir), -1.0, 1.0))
+                angle = float(np.arccos(dot))
+                v = leaf_dir - dot * stem_dir
+                v_norm = float(np.linalg.norm(v))
+                if angle > 1e-3 and v_norm > 1e-6:
+                    v = v / v_norm
+                    arc_pts = []
+                    for t in np.linspace(0.0, angle, 21):
+                        arc_pts.append(origin + (scale * 0.8) * (np.cos(t) * stem_dir + np.sin(t) * v))
+                    self._add_polyline_actor(self.A_LEAF_STEM_ARC, np.asarray(arc_pts), "orange", 3)
+                    mid = angle / 2.0
+                    label_pt = origin + (scale * 0.9) * (np.cos(mid) * stem_dir + np.sin(mid) * v)
+                    label_angle = leaf_stem.get("angle", np.degrees(angle))
+                    self._add_labels_actor(self.A_LEAF_STEM_LABEL, np.asarray([label_pt]), [f"{float(label_angle):.1f}°"])
+                else:
+                    self._remove_actor(self.A_LEAF_STEM_ARC)
+                    self._remove_actor(self.A_LEAF_STEM_LABEL)
 
     # ----------------------------
     # point list UI

@@ -362,6 +362,24 @@ class LeafMixin:
         ann["leaf_projected_area"] = float(area)
         return float(area)
 
+    def _point_on_polyline_by_ratio(self, poly: np.ndarray, ratio: float) -> Optional[np.ndarray]:
+        if poly is None or len(poly) < 2:
+            return None
+        ratio = float(np.clip(float(ratio), 0.0, 1.0))
+        seg = np.linalg.norm(poly[1:] - poly[:-1], axis=1)
+        total = float(np.sum(seg))
+        if total <= 1e-12:
+            return poly[0].copy()
+        target = ratio * total
+        acc = 0.0
+        for i, s in enumerate(seg):
+            nxt = acc + float(s)
+            if nxt >= target:
+                t = 0.0 if s <= 1e-12 else (target - acc) / float(s)
+                return (1.0 - t) * poly[i] + t * poly[i + 1]
+            acc = nxt
+        return poly[-1].copy()
+
 
     def _compute_leaf_plane_normal(
         self,
@@ -389,22 +407,26 @@ class LeafMixin:
         return normal / norm
 
 
-    def compute_leaf_inclination_instance(self) -> Optional[float]:
+    def compute_leaf_inclination_instance(
+        self,
+        ratio: Optional[float] = None,
+        radius: Optional[float] = None
+    ) -> Optional[float]:
         self._require_instance()
         if self.current_inst_id is None:
             return None
         length_poly = self._get_length_polyline_for_area()
         if length_poly is None or len(length_poly) < 2:
             return None
-        mid = np.asarray(length_poly[len(length_poly) // 2], dtype=np.float64)
-        radius = max(
-            float(getattr(self.params, "radius", 0.0)),
-            float(getattr(self.params, "slab_half", 0.0)),
-            float(getattr(self.params, "voxel", 0.0)),
-        )
-        if radius <= 0:
-            radius = None
-        normal = self._compute_leaf_plane_normal(center=mid, radius=radius)
+        ratio_val = float(self.params.leaf_inclination_ratio if ratio is None else ratio)
+        ratio_val = float(np.clip(ratio_val, 0.0, 1.0))
+        point = self._point_on_polyline_by_ratio(length_poly, ratio_val)
+        if point is None:
+            point = np.asarray(length_poly[len(length_poly) // 2], dtype=np.float64)
+        radius_val = float(self.params.leaf_inclination_radius if radius is None else radius)
+        if radius_val <= 0:
+            radius_val = None
+        normal = self._compute_leaf_plane_normal(center=point, radius=radius_val)
         if normal is None:
             return None
         z_axis = np.array([0.0, 0.0, 1.0], dtype=np.float64)
@@ -414,6 +436,14 @@ class LeafMixin:
         angle_deg = float(np.degrees(np.arccos(cos_val)))
         ann = self._ensure_annotation_entry(self.current_inst_id)
         ann["leaf_inclination"] = float(angle_deg)
+        ann["leaf_inclination_viz"] = {
+            "origin": np.asarray(point, dtype=np.float64).tolist(),
+            "normal": normal.tolist(),
+            "z_axis": z_axis.tolist(),
+            "angle": float(angle_deg),
+            "ratio": float(ratio_val),
+            "radius": None if radius_val is None else float(radius_val),
+        }
         return float(angle_deg)
 
 
@@ -433,7 +463,7 @@ class LeafMixin:
         return vec / norm
 
 
-    def _leaf_initial_direction(self, length_poly: np.ndarray) -> Optional[np.ndarray]:
+    def _leaf_initial_direction(self, length_poly: np.ndarray, ratio: Optional[float] = None) -> Optional[np.ndarray]:
         if length_poly is None or len(length_poly) < 2:
             return None
         total_len = _polyline_length(length_poly)
@@ -443,16 +473,13 @@ class LeafMixin:
             if norm <= 1e-12:
                 return None
             return vec / norm
-        target = 0.1 * float(total_len)
-        cum = 0.0
-        idx = 1
-        for i in range(len(length_poly) - 1):
-            seg = float(np.linalg.norm(length_poly[i + 1] - length_poly[i]))
-            cum += seg
-            if cum >= target:
-                idx = i + 1
-                break
-        vec = length_poly[idx] - length_poly[0]
+        ratio_val = float(self.params.leaf_stem_ratio if ratio is None else ratio)
+        ratio_val = float(np.clip(ratio_val, 0.0, 1.0))
+        point = self._point_on_polyline_by_ratio(length_poly, ratio_val)
+        if point is None:
+            vec = length_poly[1] - length_poly[0]
+        else:
+            vec = point - length_poly[0]
         norm = float(np.linalg.norm(vec))
         if norm <= 1e-12:
             return None
@@ -492,14 +519,14 @@ class LeafMixin:
         return best_dir
 
 
-    def compute_leaf_stem_angle_instance(self) -> Optional[float]:
+    def compute_leaf_stem_angle_instance(self, ratio: Optional[float] = None) -> Optional[float]:
         self._require_instance()
         if self.current_inst_id is None:
             return None
         length_poly = self._get_length_polyline_for_area()
         if length_poly is None or len(length_poly) < 2:
             return None
-        leaf_dir = self._leaf_initial_direction(length_poly)
+        leaf_dir = self._leaf_initial_direction(length_poly, ratio=ratio)
         if leaf_dir is None:
             return None
         stem_dir = self._stem_direction_near_point(length_poly[0])
@@ -510,6 +537,14 @@ class LeafMixin:
         angle_deg = float(np.degrees(np.arccos(cos_val)))
         ann = self._ensure_annotation_entry(self.current_inst_id)
         ann["leaf_stem_angle"] = float(angle_deg)
+        ratio_val = float(self.params.leaf_stem_ratio if ratio is None else ratio)
+        ann["leaf_stem_angle_viz"] = {
+            "origin": np.asarray(length_poly[0], dtype=np.float64).tolist(),
+            "leaf_dir": leaf_dir.tolist(),
+            "stem_dir": stem_dir.tolist(),
+            "angle": float(angle_deg),
+            "ratio": float(ratio_val),
+        }
         return float(angle_deg)
 
 

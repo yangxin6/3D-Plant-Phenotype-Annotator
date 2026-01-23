@@ -1,4 +1,5 @@
 # core/annotation_parts/io.py
+import csv
 import json
 import os
 from typing import Dict, Any
@@ -160,3 +161,50 @@ class IoMixin:
             full_labels[self.leaf_global_idx] = self.point_labels
         os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
         np.savetxt(out_path, full_labels, fmt="%d")
+
+    def export_phenotype_csv(self, out_path: str):
+        self._require_cloud()
+        sem_map = self._get_instance_sem_map()
+        label_to_name = {}
+        for key, name in [("leaf", "叶子"), ("stem", "茎"), ("flower", "花"), ("fruit", "果")]:
+            v = self.semantic_map.get(key)
+            if v is not None:
+                label_to_name[int(v)] = name
+
+        rows = []
+        for inst_id, ann in self.annotations.items():
+            sem_label = sem_map.get(int(inst_id), None)
+            sem_text = "-" if sem_label is None else label_to_name.get(int(sem_label), str(int(sem_label)))
+            if "length" in ann and ann.get("length") is not None:
+                rows.append([inst_id, sem_text, "叶长", f"{float(ann['length']):.3f}"])
+            if "width_path_length" in ann and ann.get("width_path_length") is not None:
+                rows.append([inst_id, sem_text, "叶宽", f"{float(ann['width_path_length']):.3f}"])
+            if "leaf_area" in ann and ann.get("leaf_area") is not None:
+                rows.append([inst_id, sem_text, "叶面积", f"{float(ann['leaf_area']):.3f}"])
+            if "leaf_projected_area" in ann and ann.get("leaf_projected_area") is not None:
+                rows.append([inst_id, sem_text, "投影面积", f"{float(ann['leaf_projected_area']):.3f}"])
+            if "leaf_inclination" in ann and ann.get("leaf_inclination") is not None:
+                rows.append([inst_id, sem_text, "叶倾角", f"{float(ann['leaf_inclination']):.1f}"])
+            if "leaf_stem_angle" in ann and ann.get("leaf_stem_angle") is not None:
+                rows.append([inst_id, sem_text, "叶夹角", f"{float(ann['leaf_stem_angle']):.1f}"])
+            if "stem_diameter" in ann and ann.get("stem_diameter") is not None:
+                rows.append([inst_id, sem_text, "茎粗", f"{float(ann['stem_diameter']):.3f}"])
+            if "stem_length" in ann and ann.get("stem_length") is not None:
+                rows.append([inst_id, sem_text, "茎长", f"{float(ann['stem_length']):.3f}"])
+            if "flower_obb" in ann and isinstance(ann.get("flower_obb"), dict):
+                lengths = ann["flower_obb"].get("lengths")
+                if lengths is not None and len(lengths) == 3:
+                    rows.append([inst_id, sem_text, "花OBB", f"{lengths[0]:.3f},{lengths[1]:.3f},{lengths[2]:.3f}"])
+            if "fruit_obb" in ann and isinstance(ann.get("fruit_obb"), dict):
+                lengths = ann["fruit_obb"].get("lengths")
+                if lengths is not None and len(lengths) == 3:
+                    rows.append([inst_id, sem_text, "果OBB", f"{lengths[0]:.3f},{lengths[1]:.3f},{lengths[2]:.3f}"])
+
+        if not rows:
+            raise RuntimeError("当前没有可导出的表型结果。")
+
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        with open(out_path, "w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["实例", "语义", "表型名字", "表型值"])
+            writer.writerows(rows)

@@ -15,6 +15,9 @@ class AnnotationParams:
     slab_half: float = 0.01
     radius: float = 0.01
     min_slice_pts: int = 60
+    leaf_inclination_ratio: float = 0.5  # 叶倾角计算位置（叶长比例）
+    leaf_inclination_radius: float = 0.01  # 叶倾角局部拟合半径（<=0 使用整叶）
+    leaf_stem_ratio: float = 0.1  # 叶夹角计算起始段长度比例
     stem_diameter_segments: int = 0
     stem_length_segments: int = 0
     stem_segments: int = 0  # 旧字段，兼容单一分段数

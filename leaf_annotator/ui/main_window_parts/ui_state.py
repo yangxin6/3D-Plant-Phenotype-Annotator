@@ -189,6 +189,8 @@ class UiStateMixin:
             self.btn_delete, self.btn_rename_ctrl, self.btn_rename_width_ctrl
         ]:
             btn.setFixedWidth(button_width)
+        if hasattr(self, "btn_export_phenotype"):
+            self.btn_export_phenotype.setFixedWidth(button_width)
 
 
     def _update_buttons(self):
@@ -228,10 +230,14 @@ class UiStateMixin:
         has_cloud = self.session.cloud is not None
         can_export = has_cloud
         self.btn_export.setEnabled(can_export)
+        if hasattr(self, "btn_export_phenotype"):
+            self.btn_export_phenotype.setEnabled(has_cloud)
         self.btn_back_browse.setEnabled(has_cloud)
         self.btn_start_anno.setEnabled(has_cloud and self.combo_inst.count() > 0)
 
         self.act_export_dir.setEnabled(True)
+        if hasattr(self, "act_export_phenotype"):
+            self.act_export_phenotype.setEnabled(has_cloud)
         self.act_back_browse.setEnabled(has_cloud)
         self.act_start_anno.setEnabled(has_cloud and self.combo_inst.count() > 0)
         self.combo_inst.setEnabled(has_cloud and self.combo_inst.count() > 0)
@@ -317,9 +323,9 @@ class UiStateMixin:
             if "leaf_projected_area" in ann and ann.get("leaf_projected_area") is not None:
                 rows.append((inst_id, sem_text, "投影面积", f"{float(ann['leaf_projected_area']):.3f}"))
             if "leaf_inclination" in ann and ann.get("leaf_inclination") is not None:
-                rows.append((inst_id, sem_text, "叶倾角", f"{float(ann['leaf_inclination']):.3f}"))
+                rows.append((inst_id, sem_text, "叶倾角", f"{float(ann['leaf_inclination']):.1f}"))
             if "leaf_stem_angle" in ann and ann.get("leaf_stem_angle") is not None:
-                rows.append((inst_id, sem_text, "叶夹角", f"{float(ann['leaf_stem_angle']):.3f}"))
+                rows.append((inst_id, sem_text, "叶夹角", f"{float(ann['leaf_stem_angle']):.1f}"))
             if "stem_diameter" in ann and ann.get("stem_diameter") is not None:
                 rows.append((inst_id, sem_text, "茎粗", f"{float(ann['stem_diameter']):.3f}"))
             if "stem_length" in ann and ann.get("stem_length") is not None:
