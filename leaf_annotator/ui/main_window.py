@@ -131,6 +131,8 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow, UiStateMixin, SemanticMixin, Sc
         self.act_smooth_paths = calc_menu.addAction("平滑叶长/叶宽")
         self.act_compute_leaf_area = calc_menu.addAction("计算叶面积")
         self.act_compute_leaf_projected_area = calc_menu.addAction("计算投影面积")
+        self.act_compute_leaf_inclination = calc_menu.addAction("计算叶倾角")
+        self.act_compute_leaf_stem_angle = calc_menu.addAction("计算叶夹角")
         calc_menu.addSeparator()
         self.act_export_labeled = calc_menu.addAction("生成标记点云")
         self.act_save_labels = menu.addAction("保存标注")
@@ -231,6 +233,8 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow, UiStateMixin, SemanticMixin, Sc
         self.btn_generate_width = QtWidgets.QPushButton("生成叶宽（W1→W2）")
         self.btn_compute_leaf_area = QtWidgets.QPushButton("计算叶面积")
         self.btn_compute_leaf_projected_area = QtWidgets.QPushButton("计算投影面积")
+        self.btn_compute_leaf_inclination = QtWidgets.QPushButton("计算叶倾角")
+        self.btn_compute_leaf_stem_angle = QtWidgets.QPushButton("计算叶夹角")
 
         self.btn_delete = QtWidgets.QPushButton("删除选中标记")
         self.btn_rename_ctrl = QtWidgets.QPushButton("重命名叶长控制点顺序 (C#)")
@@ -369,6 +373,13 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow, UiStateMixin, SemanticMixin, Sc
         leaf_area_layout.addWidget(self.btn_compute_leaf_projected_area)
         panel.addWidget(self.leaf_area_group)
 
+        # ---------- leaf angles ----------
+        self.leaf_angle_group = QtWidgets.QGroupBox("叶角度")
+        leaf_angle_layout = QtWidgets.QVBoxLayout(self.leaf_angle_group)
+        leaf_angle_layout.addWidget(self.btn_compute_leaf_inclination)
+        leaf_angle_layout.addWidget(self.btn_compute_leaf_stem_angle)
+        panel.addWidget(self.leaf_angle_group)
+
         # ---------- phenotype table ----------
         self.phenotype_group = QtWidgets.QGroupBox("表型信息")
         phenotype_layout = QtWidgets.QVBoxLayout(self.phenotype_group)
@@ -492,6 +503,8 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow, UiStateMixin, SemanticMixin, Sc
         self.btn_generate_width.clicked.connect(self.on_generate_width)
         self.btn_compute_leaf_area.clicked.connect(self.on_compute_leaf_area)
         self.btn_compute_leaf_projected_area.clicked.connect(self.on_compute_leaf_projected_area)
+        self.btn_compute_leaf_inclination.clicked.connect(self.on_compute_leaf_inclination)
+        self.btn_compute_leaf_stem_angle.clicked.connect(self.on_compute_leaf_stem_angle)
 
         self.btn_export.clicked.connect(self.on_save_annotations)
 
@@ -516,6 +529,8 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow, UiStateMixin, SemanticMixin, Sc
         self.act_generate_width.triggered.connect(self.on_generate_width)
         self.act_compute_leaf_area.triggered.connect(self.on_compute_leaf_area)
         self.act_compute_leaf_projected_area.triggered.connect(self.on_compute_leaf_projected_area)
+        self.act_compute_leaf_inclination.triggered.connect(self.on_compute_leaf_inclination)
+        self.act_compute_leaf_stem_angle.triggered.connect(self.on_compute_leaf_stem_angle)
         self.act_smooth_paths.triggered.connect(self.on_smooth_leaf_paths)
         self.act_export_labeled.triggered.connect(self.on_export_labeled_cloud)
         self.act_save_labels.triggered.connect(self.on_save_annotations)

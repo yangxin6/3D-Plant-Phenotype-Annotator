@@ -238,6 +238,34 @@ class AnnotationMixin:
             self._finish_busy_dialog(dlg)
 
 
+    def on_compute_leaf_inclination(self):
+        if (not self.annotating) or self.annotate_semantic != "leaf":
+            QMessageBox.information(self, "??", "???????????????")
+            return
+        try:
+            angle = self.session.compute_leaf_inclination_instance()
+            if angle is None:
+                QMessageBox.information(self, "??", "??????????????????????")
+                return
+            self._update_phenotype_table()
+            self._update_status(f"???????{angle:.3f}")
+        except Exception as e:
+            QMessageBox.critical(self, "????", str(e))
+
+    def on_compute_leaf_stem_angle(self):
+        if (not self.annotating) or self.annotate_semantic != "leaf":
+            QMessageBox.information(self, "??", "???????????????")
+            return
+        try:
+            angle = self.session.compute_leaf_stem_angle_instance()
+            if angle is None:
+                QMessageBox.information(self, "??", "????????????????????????")
+                return
+            self._update_phenotype_table()
+            self._update_status(f"???????{angle:.3f}")
+        except Exception as e:
+            QMessageBox.critical(self, "????", str(e))
+
     def _open_smooth_params_dialog(self) -> Optional[int]:
         value = int(getattr(self.session.params, "smooth_win", 9))
         win, ok = QtWidgets.QInputDialog.getInt(

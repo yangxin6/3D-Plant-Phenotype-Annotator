@@ -185,6 +185,7 @@ class UiStateMixin:
             self.btn_recommend_length, self.btn_generate_length,
             self.btn_recommend_width, self.btn_generate_width,
             self.btn_compute_leaf_area, self.btn_compute_leaf_projected_area,
+            self.btn_compute_leaf_inclination, self.btn_compute_leaf_stem_angle,
             self.btn_delete, self.btn_rename_ctrl, self.btn_rename_width_ctrl
         ]:
             btn.setFixedWidth(button_width)
@@ -203,6 +204,7 @@ class UiStateMixin:
             self.btn_recommend_length, self.btn_generate_length,
             self.btn_recommend_width, self.btn_generate_width,
             self.btn_compute_leaf_area, self.btn_compute_leaf_projected_area,
+            self.btn_compute_leaf_inclination, self.btn_compute_leaf_stem_angle,
             self.btn_delete, self.btn_rename_ctrl,
             self.btn_toggle_width_ctrl, self.btn_rename_width_ctrl,
         ]:
@@ -212,6 +214,8 @@ class UiStateMixin:
             self.points_group.setVisible(in_leaf_anno)
         if hasattr(self, "leaf_area_group"):
             self.leaf_area_group.setVisible(in_leaf_anno)
+        if hasattr(self, "leaf_angle_group"):
+            self.leaf_angle_group.setVisible(in_leaf_anno)
         if hasattr(self, "phenotype_group"):
             self.phenotype_group.setVisible(not in_anno)
         if hasattr(self, "bbox_info"):
@@ -244,6 +248,7 @@ class UiStateMixin:
             self.act_recommend_length, self.act_generate_length,
             self.act_recommend_width, self.act_generate_width,
             self.act_smooth_paths, self.act_compute_leaf_area, self.act_compute_leaf_projected_area,
+            self.act_compute_leaf_inclination, self.act_compute_leaf_stem_angle,
             self.act_export_labeled,
         ]:
             a.setEnabled(in_leaf_anno)
@@ -311,6 +316,10 @@ class UiStateMixin:
                 rows.append((inst_id, sem_text, "叶面积", f"{float(ann['leaf_area']):.3f}"))
             if "leaf_projected_area" in ann and ann.get("leaf_projected_area") is not None:
                 rows.append((inst_id, sem_text, "投影面积", f"{float(ann['leaf_projected_area']):.3f}"))
+            if "leaf_inclination" in ann and ann.get("leaf_inclination") is not None:
+                rows.append((inst_id, sem_text, "叶倾角", f"{float(ann['leaf_inclination']):.3f}"))
+            if "leaf_stem_angle" in ann and ann.get("leaf_stem_angle") is not None:
+                rows.append((inst_id, sem_text, "叶夹角", f"{float(ann['leaf_stem_angle']):.3f}"))
             if "stem_diameter" in ann and ann.get("stem_diameter") is not None:
                 rows.append((inst_id, sem_text, "茎粗", f"{float(ann['stem_diameter']):.3f}"))
             if "stem_length" in ann and ann.get("stem_length") is not None:
