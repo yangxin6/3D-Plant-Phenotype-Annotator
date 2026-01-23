@@ -5,6 +5,18 @@ conda create -n 3d_plant_phenotype python=3.10
 pip install -r requirements.txt
 ```
 
+```
+pip freeze > requirements.txt
+```
+
+
+打包：
+```
+pyinstaller --noconfirm --clean --windowed --name LeafAnnotator --collect-all vtk --collect-all pyvista --collect-all pyvistaqt leaf_annotator/app.py
+
+
+```
+
 
 添加：
 1. 推荐叶长
@@ -28,3 +40,4 @@ pip install -r requirements.txt
 茎粗：用圆柱你和。
 雄穗：穗位高、穗的包围盒。
 雌穗：长宽（包围盒）。
+
