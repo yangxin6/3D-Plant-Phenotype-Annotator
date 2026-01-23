@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Dict, Any, Tuple
 from types import SimpleNamespace
 
-from scipy.spatial import cKDTree
+from scipy.spatial import cKDTree, ConvexHull
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import dijkstra
 
@@ -13,6 +13,7 @@ from core.io import PointCloudIO
 from core.schema import CloudSchema, CloudParser, ParsedCloud
 from core.sampling import VoxelSampler, Downsampled
 from core.width import WidthEstimator  # ✅ 恢复：用于推荐叶宽点
+from core.centerline import CenterlineExtractor
 
 
 @dataclass
@@ -256,6 +257,21 @@ class LeafAnnotationSession:
                     else:
                         vv = int(v)
                         self.semantic_map[k] = None if vv < 0 else vv
+        if "semantic_label_names" in data and isinstance(data["semantic_label_names"], dict):
+            for label_str, name in data["semantic_label_names"].items():
+                if not isinstance(name, str):
+                    continue
+                key = name.strip()
+                if key not in self.semantic_map:
+                    continue
+                if self.semantic_map.get(key) is not None:
+                    continue
+                try:
+                    label_val = int(label_str)
+                except Exception:
+                    continue
+                if label_val >= 0:
+                    self.semantic_map[key] = label_val
         if "params" in data and isinstance(data["params"], dict):
             self._apply_params_from_dict(data["params"])
         ann_list = data.get("annotations", [])
@@ -1261,6 +1277,65 @@ class LeafAnnotationSession:
         self.width_path_points = path_pts
         self.width_path_length = _polyline_length(path_pts)
         self.width_path_indices = path_idx
+
+    def _get_length_polyline_for_area(self) -> np.ndarray:
+        if self.centerline_result is not None and getattr(self.centerline_result, "smooth_points", None) is not None:
+            return np.asarray(self.centerline_result.smooth_points, dtype=np.float64)
+        self._require_base_tip()
+        return self.build_length_polyline(use_ctrl=True)
+
+    def compute_leaf_area_instance(self, step: Optional[float] = None) -> Optional[float]:
+        self._require_instance()
+        if self.current_inst_id is None:
+            return None
+        length_poly = self._get_length_polyline_for_area()
+        if length_poly is None or len(length_poly) < 2:
+            return None
+        step_val = float(self.params.step if step is None else step)
+        if step_val <= 0:
+            raise ValueError("step must be > 0")
+
+        we = WidthEstimator(
+            step=step_val,
+            slab_half=self.params.slab_half,
+            radius=self.params.radius,
+            min_slice_pts=self.params.min_slice_pts,
+        )
+        wr = we.compute(self.leaf_pts, length_poly)
+        if wr is None or not wr.profile:
+            return None
+
+        C = CenterlineExtractor.resample_by_step(length_poly, step=step_val)
+        if len(C) < 2:
+            return None
+
+        area = 0.0
+        for item in wr.profile:
+            s = int(item.s_index)
+            if s < 0 or s + 1 >= len(C):
+                continue
+            seg_len = float(np.linalg.norm(C[s + 1] - C[s]))
+            area += float(item.width) * seg_len
+
+        ann = self._ensure_annotation_entry(self.current_inst_id)
+        ann["leaf_area"] = float(area)
+        return float(area)
+
+    def compute_leaf_projected_area_instance(self) -> Optional[float]:
+        self._require_instance()
+        if self.current_inst_id is None:
+            return None
+        if self.leaf_pts is None or len(self.leaf_pts) < 3:
+            return None
+        xy = np.asarray(self.leaf_pts[:, :2], dtype=np.float64)
+        try:
+            hull = ConvexHull(xy)
+        except Exception:
+            return None
+        area = float(hull.volume)
+        ann = self._ensure_annotation_entry(self.current_inst_id)
+        ann["leaf_projected_area"] = float(area)
+        return float(area)
 
     def smooth_leaf_paths(self, win: int) -> Tuple[bool, bool]:
         self._require_instance()
