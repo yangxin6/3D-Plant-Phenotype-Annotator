@@ -26,11 +26,9 @@ class SemanticMixin:
         model = self.combo_anno_semantic.model()
         if model is None or not hasattr(model, "item"):
             return
-        mapping = {"叶": "leaf", "茎": "stem", "花": "flower", "果": "fruit"}
         enabled_any = False
         for i in range(self.combo_anno_semantic.count()):
-            text = self.combo_anno_semantic.itemText(i)
-            key = mapping.get(text)
+            key = self.combo_anno_semantic.itemData(i)
             enabled = True
             if key is not None:
                 val = self.session.semantic_map.get(key)
@@ -53,9 +51,8 @@ class SemanticMixin:
 
 
     def _get_annotation_semantic_key(self) -> str:
-        text = self.combo_anno_semantic.currentText()
-        mapping = {"叶": "leaf", "茎": "stem", "花": "flower", "果": "fruit"}
-        return mapping.get(text, "leaf")
+        key = self.combo_anno_semantic.currentData()
+        return key if key is not None else "leaf"
 
 
     def _refresh_instance_list_for_annotation(self):
@@ -72,7 +69,7 @@ class SemanticMixin:
     def on_anno_semantic_changed(self):
         key = self._get_annotation_semantic_key()
         self.annotate_semantic = key
-        self._settings.setValue("anno_semantic", self.combo_anno_semantic.currentText())
+        self._settings.setValue("anno_semantic", self.combo_anno_semantic.currentData() or "leaf")
         if not self.annotating and self.session.cloud is not None:
             self._refresh_instance_list_for_annotation()
         self._update_buttons()

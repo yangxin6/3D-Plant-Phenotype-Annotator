@@ -4,6 +4,7 @@ from ui.main_window import LeafAnnotatorWindow
 
 def main():
     app = QtWidgets.QApplication([])
+    app.setStyleSheet("QWidget { font-size: 18px; }")
     w = LeafAnnotatorWindow()
     w.resize(1920, 1080)
     w.show()

@@ -17,27 +17,94 @@ from .constants import (
 
 
 class UiStateMixin:
+    PLANT_TYPE_MAP = {
+        "玉米": "corn",
+        "草莓": "strawberry",
+        "水稻": "rice",
+        "小麦": "wheat",
+        "corn": "corn",
+        "strawberry": "strawberry",
+        "rice": "rice",
+        "wheat": "wheat",
+    }
+
+    PLANT_TYPE_DISPLAY = {
+        "corn": "玉米",
+        "strawberry": "草莓",
+        "rice": "水稻",
+        "wheat": "小麦",
+    }
+
+    LABEL_DESC_MAP = {
+        "未选择": "unselected",
+        "完整": "complete",
+        "折断": "broken",
+        "缺失": "missing",
+        "噪声": "noise",
+        "unselected": "unselected",
+        "complete": "complete",
+        "broken": "broken",
+        "missing": "missing",
+        "noise": "noise",
+    }
+
+    LABEL_DESC_DISPLAY = {
+        "unselected": "未选择",
+        "complete": "完整",
+        "broken": "折断",
+        "missing": "缺失",
+        "noise": "噪声",
+    }
+
+    def _normalize_plant_type(self, plant_type: str) -> str:
+        if plant_type is None:
+            return ""
+        return self.PLANT_TYPE_MAP.get(str(plant_type), str(plant_type))
+
+
+    def _plant_type_display(self, plant_type: str) -> str:
+        if plant_type is None:
+            return ""
+        key = self.PLANT_TYPE_DISPLAY.get(str(plant_type), str(plant_type))
+        return self.tr(key)
+
+
+    def _normalize_label_desc(self, label_desc: str) -> str:
+        if label_desc is None:
+            return ""
+        return self.LABEL_DESC_MAP.get(str(label_desc), str(label_desc))
+
+
     def _format_annotated_summary(self) -> str:
         ids = self.session.get_annotated_ids()
         n = len(ids)
         if n == 0:
-            return "已标注实例数：0\n已标注 inst：无"
+            return self.tr("已标注实例数：0\n已标注 inst：无")
         head = ids[:30]
         tail = "" if n <= 30 else f" ...(+{n-30})"
-        return f"已标注实例数：{n}\n已标注 inst：{', '.join(map(str, head))}{tail}"
+        return self.tr(
+            "已标注实例数：{count}\n已标注 inst：{ids}{tail}",
+            count=n,
+            ids=", ".join(map(str, head)),
+            tail=tail,
+        )
 
 
     def _update_status(self, extra: str = ""):
         base = []
         if self.session.cloud is None:
-            base.append("状态：未加载")
+            base.append(self.tr("状态：未加载"))
         else:
-            has_rgb = "有" if self.session.has_rgb() else "无"
-            base.append(f"文件：{os.path.basename(self.session.file_path)}")
-            base.append(f"总点数：{len(self.session.get_full_xyz())} | RGB：{has_rgb}")
+            has_rgb = self.tr("有") if self.session.has_rgb() else self.tr("无")
+            base.append(self.tr("文件：{name}", name=os.path.basename(self.session.file_path)))
+            base.append(self.tr("总点数：{count} | RGB：{rgb}", count=len(self.session.get_full_xyz()), rgb=has_rgb))
             base.append(self._format_annotated_summary())
             if self.annotating and self.session.current_inst_id is not None:
-                base.append(f"标注模式：inst_id={self.session.current_inst_id} | pick={self.pick_mode}")
+                base.append(self.tr(
+                    "标注模式：inst_id={inst_id} | pick={pick}",
+                    inst_id=self.session.current_inst_id,
+                    pick=self.pick_mode,
+                ))
         if extra:
             base.append(extra)
         self.info.setText("\n".join(base))
@@ -45,7 +112,7 @@ class UiStateMixin:
 
     def _start_busy_dialog(self, text: str):
         dlg = QtWidgets.QProgressDialog(text, None, 0, 0, self)
-        dlg.setWindowTitle("加载中")
+        dlg.setWindowTitle(self.tr("加载中"))
         dlg.setWindowModality(QtCore.Qt.ApplicationModal)
         dlg.setCancelButton(None)
         dlg.setMinimumDuration(0)
@@ -67,11 +134,12 @@ class UiStateMixin:
         self.text_remark.blockSignals(True)
         self.combo_label_desc.blockSignals(True)
         self.text_remark.setPlainText("" if remark is None else str(remark))
-        items = [self.combo_label_desc.itemText(i) for i in range(self.combo_label_desc.count())]
+        label_desc = self._normalize_label_desc(label_desc)
+        items = [self.combo_label_desc.itemData(i) for i in range(self.combo_label_desc.count())]
         if label_desc in items:
-            self.combo_label_desc.setCurrentText(label_desc)
+            self._set_combo_current_by_data(self.combo_label_desc, label_desc)
         else:
-            self.combo_label_desc.setCurrentText("未选择")
+            self._set_combo_current_by_data(self.combo_label_desc, "unselected")
         self.text_remark.blockSignals(False)
         self.combo_label_desc.blockSignals(False)
 
@@ -104,16 +172,17 @@ class UiStateMixin:
         if not hasattr(self, "lbl_inst_sem"):
             return
         if (not self.annotating) or (self.session.current_inst_id is None):
-            self.lbl_inst_sem.setText("语义标签：-")
+            self.lbl_inst_sem.setText(self.tr("语义标签：-"))
             return
         sem_label = self._get_current_instance_sem_label()
         if sem_label is None:
-            self.lbl_inst_sem.setText("语义标签：-")
+            self.lbl_inst_sem.setText(self.tr("语义标签：-"))
         else:
-            self.lbl_inst_sem.setText(f"语义标签：{sem_label}")
+            self.lbl_inst_sem.setText(self.tr("语义标签：{label}", label=sem_label))
 
 
     def _set_plant_type(self, plant_type: str, update_status: bool = True, save_settings: bool = True):
+        plant_type = self._normalize_plant_type(plant_type)
         if plant_type not in self.plant_type_actions:
             return
         self.session.plant_type = plant_type
@@ -124,14 +193,16 @@ class UiStateMixin:
         if save_settings:
             self._settings.setValue("plant_type", plant_type)
         if update_status:
-            self._update_status(f"已选择植物类型：{plant_type}")
+            display_name = self._plant_type_display(plant_type)
+            self._update_status(self.tr("已选择植物类型：{plant_type}", plant_type=display_name))
 
 
     def on_plant_type_selected(self):
         act = self.sender()
         if act is None:
             return
-        plant_type = act.text()
+        plant_type = act.data() or act.text()
+        plant_type = self._normalize_plant_type(plant_type)
         self._set_plant_type(plant_type)
 
 
@@ -154,8 +225,8 @@ class UiStateMixin:
         if (not self.annotating) or (self.session.current_inst_id is None):
             return
         remark = self.text_remark.toPlainText()
-        label_desc = self.combo_label_desc.currentText()
-        if label_desc == "未选择":
+        label_desc = self.combo_label_desc.currentData()
+        if label_desc == "unselected":
             label_desc = ""
         self.session.set_instance_meta(self.session.current_inst_id, remark, label_desc)
 
@@ -166,10 +237,16 @@ class UiStateMixin:
         button_width = max(PANEL_BUTTON_MIN_WIDTH, panel_width - PANEL_INNER_PADDING)
 
         for combo in [
-            self.combo_anno_semantic, self.combo_sem_filter, self.combo_stem_filter,
-            self.combo_flower_filter, self.combo_fruit_filter, self.combo_inst
+            self.combo_sem_filter, self.combo_stem_filter,
+            self.combo_flower_filter, self.combo_fruit_filter
         ]:
             combo.setFixedWidth(row_combo_width)
+
+        anno_combo_width = max(PANEL_COMBO_MIN_WIDTH, row_combo_width - 30)
+        self.combo_anno_semantic.setFixedWidth(anno_combo_width)
+
+        inst_combo_width = max(PANEL_COMBO_MIN_WIDTH, row_combo_width - 30)
+        self.combo_inst.setFixedWidth(inst_combo_width)
 
         self.combo_label_desc.setFixedWidth(inner_width)
         self.text_remark.setFixedWidth(inner_width)
@@ -261,6 +338,12 @@ class UiStateMixin:
         self.act_compute_stem.setEnabled(has_cloud and in_stem_sem)
         self.act_compute_stem_length.setEnabled(has_cloud and in_stem_sem)
         self.act_compute_flower_fruit.setEnabled(has_cloud and in_flower_fruit_sem)
+        if hasattr(self, "act_growth_manual"):
+            self.act_growth_manual.setEnabled(has_cloud and not self.annotating)
+        if hasattr(self, "act_growth_stem"):
+            self.act_growth_stem.setEnabled(has_cloud)
+        if hasattr(self, "act_measure_plant"):
+            self.act_measure_plant.setEnabled(has_cloud)
         self.btn_toggle_measure.setEnabled(has_cloud)
         stem_tools_visible = in_anno and self.annotate_semantic == "stem"
         if hasattr(self, "btn_toggle_stem_cyl"):
@@ -286,11 +369,50 @@ class UiStateMixin:
             if changed:
                 self._refresh_scene()
                 self.plotter.render()
+        has_growth = hasattr(self.session, "growth_direction") and self.session.growth_direction is not None
+        has_measure = hasattr(self.session, "has_plant_measurements") and self.session.has_plant_measurements()
+        if hasattr(self, "btn_toggle_growth_dir"):
+            self.btn_toggle_growth_dir.setEnabled(has_cloud and has_growth)
+            if not has_growth and self.btn_toggle_growth_dir.isChecked():
+                self.btn_toggle_growth_dir.blockSignals(True)
+                self.btn_toggle_growth_dir.setChecked(False)
+                self.btn_toggle_growth_dir.blockSignals(False)
+                self._update_growth_direction_display()
+        if hasattr(self, "btn_toggle_plant_height"):
+            self.btn_toggle_plant_height.setEnabled(has_cloud and has_measure)
+            if not has_measure and self.btn_toggle_plant_height.isChecked():
+                self.btn_toggle_plant_height.blockSignals(True)
+                self.btn_toggle_plant_height.setChecked(False)
+                self.btn_toggle_plant_height.blockSignals(False)
+                self._update_plant_measurement_display()
+        if hasattr(self, "btn_toggle_plant_crown"):
+            self.btn_toggle_plant_crown.setEnabled(has_cloud and has_measure)
+            if not has_measure and self.btn_toggle_plant_crown.isChecked():
+                self.btn_toggle_plant_crown.blockSignals(True)
+                self.btn_toggle_plant_crown.setChecked(False)
+                self.btn_toggle_plant_crown.blockSignals(False)
+                self._update_plant_measurement_display()
         for b in [
             self.btn_view_front, self.btn_view_side, self.btn_view_top,
             self.btn_pick_view_center, self.btn_toggle_aabb, self.btn_toggle_obb
         ]:
             b.setEnabled(has_cloud)
+
+        rotation_ready = has_cloud and has_growth
+        rotation_active = bool(getattr(self, "_rotation_active", False))
+        if hasattr(self, "combo_rotate_axis"):
+            self.combo_rotate_axis.setEnabled(rotation_ready and rotation_active)
+        if hasattr(self, "spin_rotate_step"):
+            self.spin_rotate_step.setEnabled(rotation_ready and rotation_active)
+        for btn_name in ["btn_rotate_minus", "btn_rotate_plus"]:
+            if hasattr(self, btn_name):
+                getattr(self, btn_name).setEnabled(rotation_ready and rotation_active)
+        if hasattr(self, "btn_rotate_start"):
+            self.btn_rotate_start.setEnabled(rotation_ready and not rotation_active)
+        if hasattr(self, "btn_rotate_finish"):
+            self.btn_rotate_finish.setEnabled(rotation_ready and rotation_active)
+        if hasattr(self, "btn_rotate_reset"):
+            self.btn_rotate_reset.setEnabled(rotation_ready)
 
     # ----------------------------
     # vtk picking (Shift+Left Click)
@@ -305,43 +427,55 @@ class UiStateMixin:
 
         sem_map = self._get_instance_sem_map()
         label_to_name = {}
-        for key, name in [("leaf", "叶"), ("stem", "茎"), ("flower", "花"), ("fruit", "果")]:
+        for key, name in [("leaf", self.tr("叶")), ("stem", self.tr("茎")), ("flower", self.tr("花")), ("fruit", self.tr("果"))]:
             v = self.session.semantic_map.get(key)
             if v is not None:
                 label_to_name[int(v)] = name
 
         rows = []
+        if hasattr(self.session, "plant_measurements"):
+            meas = self.session.plant_measurements or {}
+            height = meas.get("height")
+            crown = meas.get("crown_width")
+            if height is not None:
+                rows.append((self.tr("整株"), "-", self.tr("株高"), f"{float(height):.3f}"))
+            if crown is not None:
+                rows.append((self.tr("整株"), "-", self.tr("冠幅"), f"{float(crown):.3f}"))
         for inst_id, ann in self.session.annotations.items():
             sem_label = sem_map.get(int(inst_id), None)
             sem_text = "-" if sem_label is None else label_to_name.get(int(sem_label), str(int(sem_label)))
             if "length" in ann and ann.get("length") is not None:
-                rows.append((inst_id, sem_text, "叶长", f"{float(ann['length']):.3f}"))
+                rows.append((inst_id, sem_text, self.tr("叶长"), f"{float(ann['length']):.3f}"))
             if "width_path_length" in ann and ann.get("width_path_length") is not None:
-                rows.append((inst_id, sem_text, "叶宽", f"{float(ann['width_path_length']):.3f}"))
+                rows.append((inst_id, sem_text, self.tr("叶宽"), f"{float(ann['width_path_length']):.3f}"))
             if "leaf_area" in ann and ann.get("leaf_area") is not None:
-                rows.append((inst_id, sem_text, "叶面积", f"{float(ann['leaf_area']):.3f}"))
+                rows.append((inst_id, sem_text, self.tr("叶面积"), f"{float(ann['leaf_area']):.3f}"))
             if "leaf_projected_area" in ann and ann.get("leaf_projected_area") is not None:
-                rows.append((inst_id, sem_text, "投影面积", f"{float(ann['leaf_projected_area']):.3f}"))
+                rows.append((inst_id, sem_text, self.tr("投影面积"), f"{float(ann['leaf_projected_area']):.3f}"))
             if "leaf_inclination" in ann and ann.get("leaf_inclination") is not None:
-                rows.append((inst_id, sem_text, "叶倾角", f"{float(ann['leaf_inclination']):.1f}"))
+                rows.append((inst_id, sem_text, self.tr("叶倾角"), f"{float(ann['leaf_inclination']):.1f}"))
             if "leaf_stem_angle" in ann and ann.get("leaf_stem_angle") is not None:
-                rows.append((inst_id, sem_text, "叶夹角", f"{float(ann['leaf_stem_angle']):.1f}"))
+                rows.append((inst_id, sem_text, self.tr("叶夹角"), f"{float(ann['leaf_stem_angle']):.1f}"))
             if "stem_diameter" in ann and ann.get("stem_diameter") is not None:
-                rows.append((inst_id, sem_text, "茎粗", f"{float(ann['stem_diameter']):.3f}"))
+                rows.append((inst_id, sem_text, self.tr("茎粗"), f"{float(ann['stem_diameter']):.3f}"))
             if "stem_length" in ann and ann.get("stem_length") is not None:
-                rows.append((inst_id, sem_text, "茎长", f"{float(ann['stem_length']):.3f}"))
+                rows.append((inst_id, sem_text, self.tr("茎长"), f"{float(ann['stem_length']):.3f}"))
             if "flower_obb" in ann and isinstance(ann.get("flower_obb"), dict):
                 lengths = ann["flower_obb"].get("lengths")
                 if lengths is not None and len(lengths) == 3:
-                    rows.append((inst_id, sem_text, "花OBB", f"{lengths[0]:.3f},{lengths[1]:.3f},{lengths[2]:.3f}"))
+                    rows.append((inst_id, sem_text, self.tr("花OBB"), f"{lengths[0]:.3f},{lengths[1]:.3f},{lengths[2]:.3f}"))
             if "fruit_obb" in ann and isinstance(ann.get("fruit_obb"), dict):
                 lengths = ann["fruit_obb"].get("lengths")
                 if lengths is not None and len(lengths) == 3:
-                    rows.append((inst_id, sem_text, "果OBB", f"{lengths[0]:.3f},{lengths[1]:.3f},{lengths[2]:.3f}"))
+                    rows.append((inst_id, sem_text, self.tr("果OBB"), f"{lengths[0]:.3f},{lengths[1]:.3f},{lengths[2]:.3f}"))
 
         self.table_phenotype.setRowCount(len(rows))
         for r, (inst_id, sem_text, name, value) in enumerate(rows):
-            for c, val in enumerate([str(int(inst_id)), str(sem_text), str(name), str(value)]):
+            try:
+                inst_text = str(int(inst_id))
+            except Exception:
+                inst_text = str(inst_id)
+            for c, val in enumerate([inst_text, str(sem_text), str(name), str(value)]):
                 it = QtWidgets.QTableWidgetItem(val)
                 it.setTextAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
                 self.table_phenotype.setItem(r, c, it)

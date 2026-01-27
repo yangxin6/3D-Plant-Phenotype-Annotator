@@ -10,6 +10,43 @@ from core.io import PointCloudIO
 from core.schema import CloudParser
 
 
+PLANT_TYPE_MAP = {
+    "玉米": "corn",
+    "草莓": "strawberry",
+    "水稻": "rice",
+    "小麦": "wheat",
+    "corn": "corn",
+    "strawberry": "strawberry",
+    "rice": "rice",
+    "wheat": "wheat",
+}
+
+LABEL_DESC_MAP = {
+    "未选择": "unselected",
+    "完整": "complete",
+    "折断": "broken",
+    "缺失": "missing",
+    "噪声": "noise",
+    "unselected": "unselected",
+    "complete": "complete",
+    "broken": "broken",
+    "missing": "missing",
+    "noise": "noise",
+}
+
+
+def _normalize_plant_type(value: str) -> str:
+    if value is None:
+        return ""
+    return PLANT_TYPE_MAP.get(str(value), str(value))
+
+
+def _normalize_label_desc(value: str) -> str:
+    if value is None:
+        return ""
+    return LABEL_DESC_MAP.get(str(value), str(value))
+
+
 class IoMixin:
     def load(self, path: str):
         arr = PointCloudIO.load_array(path)
@@ -18,6 +55,11 @@ class IoMixin:
         self.annotations = {}
         self.instance_meta = {}
         self.full_point_labels = None
+        self.growth_origin = None
+        self.growth_direction = None
+        self.growth_basis = None
+        self.growth_method = None
+        self.plant_measurements = {}
         self.clear_instance_state()
 
 
@@ -25,7 +67,7 @@ class IoMixin:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         if "plant_type" in data:
-            self.plant_type = str(data.get("plant_type") or self.plant_type)
+            self.plant_type = _normalize_plant_type(str(data.get("plant_type") or self.plant_type))
         if "semantic_map" in data and isinstance(data["semantic_map"], dict):
             for k in ["leaf", "stem", "flower", "fruit"]:
                 if k in data["semantic_map"]:
@@ -52,6 +94,12 @@ class IoMixin:
                     self.semantic_map[key] = label_val
         if "params" in data and isinstance(data["params"], dict):
             self._apply_params_from_dict(data["params"])
+        growth_info = data.get("growth_direction")
+        if isinstance(growth_info, dict) and hasattr(self, "load_growth_info_dict"):
+            self.load_growth_info_dict(growth_info)
+        plant_meas = data.get("plant_measurements")
+        if isinstance(plant_meas, dict) and hasattr(self, "load_plant_measurements_dict"):
+            self.load_plant_measurements_dict(plant_meas)
         ann_list = data.get("annotations", [])
         self.annotations = {}
         self.instance_meta = {}
@@ -62,7 +110,7 @@ class IoMixin:
             if "remark" in ann:
                 meta["remark"] = str(ann.get("remark") or "")
             if "label_desc" in ann:
-                meta["label_desc"] = str(ann.get("label_desc") or "")
+                meta["label_desc"] = _normalize_label_desc(str(ann.get("label_desc") or ""))
             if meta:
                 self.instance_meta[inst_id] = meta
 
@@ -121,7 +169,8 @@ class IoMixin:
     def export_all_json(self, out_path: str):
         self._require_cloud()
         ann_list = self._build_export_annotations()
-        if len(ann_list) == 0:
+        has_plant_data = hasattr(self, "has_plant_data") and self.has_plant_data()
+        if len(ann_list) == 0 and not has_plant_data:
             raise RuntimeError("当前文件还没有任何实例被标注。")
 
         semantic_map = {}
@@ -132,9 +181,13 @@ class IoMixin:
             if v is not None:
                 semantic_label_names[str(int(v))] = k
 
+        for ann in ann_list:
+            if "label_desc" in ann:
+                ann["label_desc"] = _normalize_label_desc(str(ann.get("label_desc") or ""))
+
         out = {
             "input": self.file_path,
-            "plant_type": self.plant_type,
+            "plant_type": _normalize_plant_type(self.plant_type),
             "semantic_map": semantic_map,
             "semantic_label_names": semantic_label_names,
             "schema": {
@@ -146,6 +199,12 @@ class IoMixin:
             "params": vars(self.params),
             "annotations": ann_list
         }
+        growth = self.get_growth_info_dict() if hasattr(self, "get_growth_info_dict") else None
+        if growth is not None:
+            out["growth_direction"] = growth
+        plant_meas = self.get_plant_measurements_dict() if hasattr(self, "get_plant_measurements_dict") else None
+        if plant_meas is not None:
+            out["plant_measurements"] = plant_meas
 
         os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
         with open(out_path, "w", encoding="utf-8") as f:
@@ -172,6 +231,14 @@ class IoMixin:
                 label_to_name[int(v)] = name
 
         rows = []
+        if hasattr(self, "plant_measurements"):
+            meas = self.plant_measurements or {}
+            height = meas.get("height")
+            crown = meas.get("crown_width")
+            if height is not None:
+                rows.append(["整株", "-", "株高", f"{float(height):.3f}"])
+            if crown is not None:
+                rows.append(["整株", "-", "冠幅", f"{float(crown):.3f}"])
         for inst_id, ann in self.annotations.items():
             sem_label = sem_map.get(int(inst_id), None)
             sem_text = "-" if sem_label is None else label_to_name.get(int(sem_label), str(int(sem_label)))

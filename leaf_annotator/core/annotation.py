@@ -33,15 +33,16 @@ from core.annotation_parts.obb import ObbMixin
 from core.annotation_parts.instance import InstanceMixin
 from core.annotation_parts.leaf import LeafMixin
 from core.annotation_parts.cache import CacheMixin
+from core.annotation_parts.plant import PlantMixin
 
-class LeafAnnotationSession(BaseMixin, IoMixin, SemanticMixin, StemMixin, ObbMixin, InstanceMixin, LeafMixin, CacheMixin):
+class LeafAnnotationSession(BaseMixin, IoMixin, SemanticMixin, StemMixin, ObbMixin, InstanceMixin, LeafMixin, CacheMixin, PlantMixin):
     def __init__(self, params: Optional[AnnotationParams] = None, schema: Optional[CloudSchema] = None):
         self.params = params or AnnotationParams()
         self.schema = schema or CloudSchema()
 
         self.file_path: Optional[str] = None
         self.cloud: Optional[ParsedCloud] = None
-        self.plant_type: str = "玉米"
+        self.plant_type: str = "corn"
         self.semantic_map: Dict[str, Optional[int]] = {"leaf": None, "stem": None, "flower": None, "fruit": None}
 
         self.current_inst_id: Optional[int] = None
@@ -80,4 +81,10 @@ class LeafAnnotationSession(BaseMixin, IoMixin, SemanticMixin, StemMixin, ObbMix
         self.annotations: Dict[int, Dict[str, Any]] = {}
         self.instance_meta: Dict[int, Dict[str, str]] = {}
         self.use_cached_results: bool = True
+
+        self.growth_origin: Optional[np.ndarray] = None
+        self.growth_direction: Optional[np.ndarray] = None
+        self.growth_basis: Optional[np.ndarray] = None
+        self.growth_method: Optional[str] = None
+        self.plant_measurements: Dict[str, Any] = {}
 

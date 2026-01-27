@@ -41,17 +41,21 @@ class AnnotationMixin:
             self._exit_current_mode(commit=True)
 
         if self.session.base_idx is None or self.session.tip_idx is None:
-            QMessageBox.information(self, "提示", "请先完成叶基(B1)和叶尖(T1)选择（可选控制点）。")
+            QMessageBox.information(self, self.tr("提示"), self.tr("请先完成叶基(B1)和叶尖(T1)选择（可选控制点）。"))
             return
 
         dlg = None
         try:
-            dlg = self._start_busy_dialog("正在推荐叶宽...")
+            dlg = self._start_busy_dialog(self.tr("正在推荐叶宽..."))
             ok = self.session.recommend_width_endpoints(overwrite=True)
             if not ok:
                 self._finish_busy_dialog(dlg)
                 dlg = None
-                QMessageBox.information(self, "提示", "未能找到有效的最大叶宽推荐（可调大 radius/slab_half 或检查点云密度）。")
+                QMessageBox.information(
+                    self,
+                    self.tr("提示"),
+                    self.tr("未能找到有效的最大叶宽推荐（可调大 radius/slab_half 或检查点云密度）。"),
+                )
                 # 仍刷新一下（有时推荐失败但已有旧点）
                 self._update_markers_saved()
                 self._update_labels_saved()
@@ -85,16 +89,16 @@ class AnnotationMixin:
             self._refresh_point_lists()
             self.plotter.render()
 
-            self._update_status("已推荐叶宽点：W1/W2 已更新（橙色点），并显示最短路径（绿色线）。")
+            self._update_status(self.tr("已推荐叶宽点：W1/W2 已更新（橙色点），并显示最短路径（绿色线）。"))
         except Exception as e:
-            QMessageBox.critical(self, "推荐失败", str(e))
+            QMessageBox.critical(self, self.tr("推荐失败"), str(e))
         finally:
             self._finish_busy_dialog(dlg)
 
 
     def on_width_params_dialog(self):
         dlg = QtWidgets.QDialog(self)
-        dlg.setWindowTitle("叶宽推荐参数")
+        dlg.setWindowTitle(self.tr("叶宽推荐参数"))
         layout = QtWidgets.QVBoxLayout(dlg)
 
         form = QtWidgets.QFormLayout()
@@ -120,15 +124,15 @@ class AnnotationMixin:
         spin_min_pts.setRange(1, 100000)
         spin_min_pts.setValue(int(self.session.params.min_slice_pts))
 
-        form.addRow("步长 step：", spin_step)
-        form.addRow("薄片半厚 slab_half：", spin_slab)
-        form.addRow("半径 radius：", spin_radius)
-        form.addRow("最小截面点数 min_slice_pts：", spin_min_pts)
+        form.addRow(self.tr("步长 step："), spin_step)
+        form.addRow(self.tr("薄片半厚 slab_half："), spin_slab)
+        form.addRow(self.tr("半径 radius："), spin_radius)
+        form.addRow(self.tr("最小截面点数 min_slice_pts："), spin_min_pts)
         layout.addLayout(form)
 
         tips = QtWidgets.QLabel(
-            "说明：step 越小越细致但更慢；slab_half/radius 越大越稳定但可能跨到邻近结构；"
-            "min_slice_pts 太小易受噪声影响，太大可能找不到截面。"
+            self.tr("说明：step 越小越细致但更慢；slab_half/radius 越大越稳定但可能跨到邻近结构；"
+                    "min_slice_pts 太小易受噪声影响，太大可能找不到截面。")
         )
         tips.setWordWrap(True)
         layout.addWidget(tips)
@@ -145,7 +149,7 @@ class AnnotationMixin:
         self.session.params.slab_half = float(spin_slab.value())
         self.session.params.radius = float(spin_radius.value())
         self.session.params.min_slice_pts = int(spin_min_pts.value())
-        self._update_status("已更新叶宽推荐参数。")
+        self._update_status(self.tr("已更新叶宽推荐参数。"))
         return True
 
 
@@ -160,12 +164,12 @@ class AnnotationMixin:
             self._exit_current_mode(commit=True)
 
         if getattr(self.session, "width_w1_idx", None) is None or getattr(self.session, "width_w2_idx", None) is None:
-            QMessageBox.information(self, "提示", "请先选择叶宽端点 W1/W2。")
+            QMessageBox.information(self, self.tr("提示"), self.tr("请先选择叶宽端点 W1/W2。"))
             return
 
         dlg = None
         try:
-            dlg = self._start_busy_dialog("正在生成叶宽...")
+            dlg = self._start_busy_dialog(self.tr("正在生成叶宽..."))
             self.session.compute_width_path()
             path_idx = getattr(self.session, "width_path_indices", None)
             if path_idx is not None and len(path_idx) > 0:
@@ -191,56 +195,56 @@ class AnnotationMixin:
             self._refresh_point_lists()
             wlen = getattr(self.session, "width_path_length", None)
             if wlen is None:
-                self._update_status("叶宽路径生成完成。")
+                self._update_status(self.tr("叶宽路径生成完成。"))
             else:
-                self._update_status(f"叶宽路径生成完成：长度={wlen:.6f}")
+                self._update_status(self.tr("叶宽路径生成完成：长度={length:.6f}", length=wlen))
         except Exception as e:
-            QMessageBox.critical(self, "生成叶宽失败", str(e))
+            QMessageBox.critical(self, self.tr("生成叶宽失败"), str(e))
         finally:
             self._finish_busy_dialog(dlg)
 
 
     def on_compute_leaf_area(self):
         if (not self.annotating) or self.annotate_semantic != "leaf":
-            QMessageBox.information(self, "提示", "请在叶子标注模式下计算叶面积。")
+            QMessageBox.information(self, self.tr("提示"), self.tr("请在叶子标注模式下计算叶面积。"))
             return
         dlg = None
         try:
-            dlg = self._start_busy_dialog("正在计算叶面积...")
+            dlg = self._start_busy_dialog(self.tr("正在计算叶面积..."))
             area = self.session.compute_leaf_area_instance()
             if area is None:
-                QMessageBox.information(self, "提示", "当前无法计算叶面积，请先生成叶长并检查点云密度。")
+                QMessageBox.information(self, self.tr("提示"), self.tr("当前无法计算叶面积，请先生成叶长并检查点云密度。"))
                 return
             self._update_phenotype_table()
-            self._update_status(f"已计算叶面积：{area:.3f}")
+            self._update_status(self.tr("已计算叶面积：{area:.3f}", area=area))
         except Exception as e:
-            QMessageBox.critical(self, "计算失败", str(e))
+            QMessageBox.critical(self, self.tr("计算失败"), str(e))
         finally:
             self._finish_busy_dialog(dlg)
 
 
     def on_compute_leaf_projected_area(self):
         if (not self.annotating) or self.annotate_semantic != "leaf":
-            QMessageBox.information(self, "提示", "请在叶子标注模式下计算投影面积。")
+            QMessageBox.information(self, self.tr("提示"), self.tr("请在叶子标注模式下计算投影面积。"))
             return
         dlg = None
         try:
-            dlg = self._start_busy_dialog("正在计算投影面积...")
+            dlg = self._start_busy_dialog(self.tr("正在计算投影面积..."))
             area = self.session.compute_leaf_projected_area_instance()
             if area is None:
-                QMessageBox.information(self, "提示", "当前无法计算投影面积，请检查点云数据。")
+                QMessageBox.information(self, self.tr("提示"), self.tr("当前无法计算投影面积，请检查点云数据。"))
                 return
             self._update_phenotype_table()
-            self._update_status(f"已计算投影面积：{area:.3f}")
+            self._update_status(self.tr("已计算投影面积：{area:.3f}", area=area))
         except Exception as e:
-            QMessageBox.critical(self, "计算失败", str(e))
+            QMessageBox.critical(self, self.tr("计算失败"), str(e))
         finally:
             self._finish_busy_dialog(dlg)
 
 
     def _open_leaf_inclination_params_dialog(self) -> Optional[Tuple[float, float]]:
         dlg = QtWidgets.QDialog(self)
-        dlg.setWindowTitle("叶倾角参数")
+        dlg.setWindowTitle(self.tr("叶倾角参数"))
         layout = QtWidgets.QVBoxLayout(dlg)
 
         form = QtWidgets.QFormLayout()
@@ -263,11 +267,11 @@ class AnnotationMixin:
             )
         spin_radius.setValue(float(default_radius))
 
-        form.addRow("位置比例(0-1)：", spin_ratio)
-        form.addRow("局部半径(0=整叶)：", spin_radius)
+        form.addRow(self.tr("位置比例(0-1)："), spin_ratio)
+        form.addRow(self.tr("局部半径(0=整叶)："), spin_radius)
         layout.addLayout(form)
 
-        tips = QtWidgets.QLabel("说明：位置比例沿叶长从基部到尖端；半径用于局部平面拟合。")
+        tips = QtWidgets.QLabel(self.tr("说明：位置比例沿叶长从基部到尖端；半径用于局部平面拟合。"))
         tips.setWordWrap(True)
         layout.addWidget(tips)
 
@@ -283,7 +287,7 @@ class AnnotationMixin:
 
     def _open_leaf_stem_angle_params_dialog(self) -> Optional[float]:
         dlg = QtWidgets.QDialog(self)
-        dlg.setWindowTitle("叶夹角参数")
+        dlg.setWindowTitle(self.tr("叶夹角参数"))
         layout = QtWidgets.QVBoxLayout(dlg)
 
         form = QtWidgets.QFormLayout()
@@ -293,10 +297,10 @@ class AnnotationMixin:
         spin_ratio.setSingleStep(0.05)
         spin_ratio.setValue(float(getattr(self.session.params, "leaf_stem_ratio", 0.1)))
 
-        form.addRow("起始比例(0-1)：", spin_ratio)
+        form.addRow(self.tr("起始比例(0-1)："), spin_ratio)
         layout.addLayout(form)
 
-        tips = QtWidgets.QLabel("说明：起始比例用于定义叶长起始段方向。")
+        tips = QtWidgets.QLabel(self.tr("说明：起始比例用于定义叶长起始段方向。"))
         tips.setWordWrap(True)
         layout.addWidget(tips)
 
@@ -312,7 +316,7 @@ class AnnotationMixin:
 
     def on_compute_leaf_inclination(self):
         if (not self.annotating) or self.annotate_semantic != "leaf":
-            QMessageBox.information(self, "提示", "请在叶子标注模式下计算叶倾角。")
+            QMessageBox.information(self, self.tr("提示"), self.tr("请在叶子标注模式下计算叶倾角。"))
             return
         dlg = None
         try:
@@ -322,23 +326,23 @@ class AnnotationMixin:
             ratio, radius = params
             self.session.params.leaf_inclination_ratio = float(ratio)
             self.session.params.leaf_inclination_radius = float(radius)
-            dlg = self._start_busy_dialog("正在计算叶倾角...")
+            dlg = self._start_busy_dialog(self.tr("正在计算叶倾角..."))
             angle = self.session.compute_leaf_inclination_instance(ratio=ratio, radius=radius)
             if angle is None:
-                QMessageBox.information(self, "提示", "当前无法计算叶倾角，请先生成叶长并检查点云。")
+                QMessageBox.information(self, self.tr("提示"), self.tr("当前无法计算叶倾角，请先生成叶长并检查点云。"))
                 return
             self._update_phenotype_table()
-            self._update_status(f"已计算叶倾角：{angle:.1f}")
+            self._update_status(self.tr("已计算叶倾角：{angle:.1f}", angle=angle))
             self._update_lines()
             self.plotter.render()
         except Exception as e:
-            QMessageBox.critical(self, "计算失败", str(e))
+            QMessageBox.critical(self, self.tr("计算失败"), str(e))
         finally:
             self._finish_busy_dialog(dlg)
 
     def on_compute_leaf_stem_angle(self):
         if (not self.annotating) or self.annotate_semantic != "leaf":
-            QMessageBox.information(self, "提示", "请在叶子标注模式下计算叶夹角。")
+            QMessageBox.information(self, self.tr("提示"), self.tr("请在叶子标注模式下计算叶夹角。"))
             return
         dlg = None
         try:
@@ -346,17 +350,17 @@ class AnnotationMixin:
             if ratio is None:
                 return
             self.session.params.leaf_stem_ratio = float(ratio)
-            dlg = self._start_busy_dialog("正在计算叶夹角...")
+            dlg = self._start_busy_dialog(self.tr("正在计算叶夹角..."))
             angle = self.session.compute_leaf_stem_angle_instance(ratio=ratio)
             if angle is None:
-                QMessageBox.information(self, "提示", "当前无法计算叶夹角，请先计算茎长并确保叶长有效。")
+                QMessageBox.information(self, self.tr("提示"), self.tr("当前无法计算叶夹角，请先计算茎长并确保叶长有效。"))
                 return
             self._update_phenotype_table()
-            self._update_status(f"已计算叶夹角：{angle:.1f}")
+            self._update_status(self.tr("已计算叶夹角：{angle:.1f}", angle=angle))
             self._update_lines()
             self.plotter.render()
         except Exception as e:
-            QMessageBox.critical(self, "计算失败", str(e))
+            QMessageBox.critical(self, self.tr("计算失败"), str(e))
         finally:
             self._finish_busy_dialog(dlg)
 
@@ -364,8 +368,8 @@ class AnnotationMixin:
         value = int(getattr(self.session.params, "smooth_win", 9))
         win, ok = QtWidgets.QInputDialog.getInt(
             self,
-            "平滑曲线",
-            "平滑窗口(奇数, >=3)：",
+            self.tr("平滑曲线"),
+            self.tr("平滑窗口(奇数, >=3)："),
             value=value,
             min=3,
             max=9999,
@@ -378,7 +382,7 @@ class AnnotationMixin:
 
     def on_smooth_leaf_paths(self):
         if (not self.annotating) or self.annotate_semantic != "leaf":
-            QMessageBox.information(self, "提示", "请在叶子标注模式下使用平滑曲线功能。")
+            QMessageBox.information(self, self.tr("提示"), self.tr("请在叶子标注模式下使用平滑曲线功能。"))
             return
         win = self._open_smooth_params_dialog()
         if win is None:
@@ -386,27 +390,27 @@ class AnnotationMixin:
         self.session.params.smooth_win = int(win)
         dlg = None
         try:
-            dlg = self._start_busy_dialog("正在平滑叶长/叶宽...")
+            dlg = self._start_busy_dialog(self.tr("正在平滑叶长/叶宽..."))
             updated_len, updated_wid = self.session.smooth_leaf_paths(win)
         except Exception as e:
-            QMessageBox.critical(self, "平滑失败", str(e))
+            QMessageBox.critical(self, self.tr("平滑失败"), str(e))
             return
         finally:
             self._finish_busy_dialog(dlg)
         if not updated_len and not updated_wid:
-            QMessageBox.information(self, "提示", "当前没有可平滑的叶长/叶宽路径，请先生成叶长和叶宽。")
+            QMessageBox.information(self, self.tr("提示"), self.tr("当前没有可平滑的叶长/叶宽路径，请先生成叶长和叶宽。"))
             return
-        if self.combo_view.currentText() == "表型标签":
-            self._refresh_scene(mode="表型标签")
+        if self._get_view_mode() == self.VIEW_LABEL:
+            self._refresh_scene(mode=self.VIEW_LABEL)
         else:
             self._update_lines()
             self.plotter.render()
         parts = []
         if updated_len:
-            parts.append("叶长")
+            parts.append(self.tr("叶长"))
         if updated_wid:
-            parts.append("叶宽")
-        msg = f"已平滑：{'、'.join(parts)}，窗口={win}"
+            parts.append(self.tr("叶宽"))
+        msg = self.tr("已平滑：{parts}，窗口={win}", parts="、".join(parts), win=win)
         self._update_status(msg)
 
 
@@ -424,12 +428,12 @@ class AnnotationMixin:
             self._exit_current_mode(commit=True)
 
         if self.session.base_idx is None or self.session.tip_idx is None:
-            QMessageBox.information(self, "提示", "请先完成叶基(B1)和叶尖(T1)选择。")
+            QMessageBox.information(self, self.tr("提示"), self.tr("请先完成叶基(B1)和叶尖(T1)选择。"))
             return
 
         dlg = None
         try:
-            dlg = self._start_busy_dialog("正在推荐叶长...")
+            dlg = self._start_busy_dialog(self.tr("正在推荐叶长..."))
             result = self.session.compute_centerline(use_ctrl=False)
             path_idx = getattr(result, "path_indices", None)
             if path_idx is not None and len(path_idx) > 0:
@@ -454,16 +458,18 @@ class AnnotationMixin:
             self._update_labels_saved()
             self._refresh_point_lists()
             L = self.session.centerline_result.length if self.session.centerline_result else None
-            self._update_status(f"已推荐叶长（B1→T1 最短路径）：叶长={L:.6f}，并将 step 作为控制点。")
+            self._update_status(
+                self.tr("已推荐叶长（B1→T1 最短路径）：叶长={length:.6f}，并将 step 作为控制点。", length=L)
+            )
         except Exception as e:
-            QMessageBox.critical(self, "推荐叶长失败", str(e))
+            QMessageBox.critical(self, self.tr("推荐叶长失败"), str(e))
         finally:
             self._finish_busy_dialog(dlg)
 
 
     def _open_length_params_dialog(self) -> bool:
         dlg = QtWidgets.QDialog(self)
-        dlg.setWindowTitle("叶长推荐参数")
+        dlg.setWindowTitle(self.tr("叶长推荐参数"))
         layout = QtWidgets.QVBoxLayout(dlg)
 
         form = QtWidgets.QFormLayout()
@@ -489,15 +495,15 @@ class AnnotationMixin:
         spin_graph_r.setSingleStep(0.001)
         spin_graph_r.setValue(float(self.session.params.graph_radius))
 
-        form.addRow("步长 step：", spin_step)
-        form.addRow("半径 radius：", spin_radius)
-        form.addRow("最小截面点数 min_slice_pts：", spin_min_pts)
-        form.addRow("连通半径 graph_radius：", spin_graph_r)
+        form.addRow(self.tr("步长 step："), spin_step)
+        form.addRow(self.tr("半径 radius："), spin_radius)
+        form.addRow(self.tr("最小截面点数 min_slice_pts："), spin_min_pts)
+        form.addRow(self.tr("连通半径 graph_radius："), spin_graph_r)
         layout.addLayout(form)
 
         tips = QtWidgets.QLabel(
-            "说明：graph_radius 越大越连通但更慢；step 越小越细致但更慢；"
-            "radius 越大越稳定但可能跨到邻近结构；min_slice_pts 太小易受噪声影响。"
+            self.tr("说明：graph_radius 越大越连通但更慢；step 越小越细致但更慢；"
+                    "radius 越大越稳定但可能跨到邻近结构；min_slice_pts 太小易受噪声影响。")
         )
         tips.setWordWrap(True)
         layout.addWidget(tips)
@@ -514,7 +520,7 @@ class AnnotationMixin:
         self.session.params.radius = float(spin_radius.value())
         self.session.params.min_slice_pts = int(spin_min_pts.value())
         self.session.params.graph_radius = float(spin_graph_r.value())
-        self._update_status("已更新叶长推荐参数。")
+        self._update_status(self.tr("已更新叶长推荐参数。"))
         return True
 
 
@@ -529,21 +535,21 @@ class AnnotationMixin:
             self._exit_current_mode(commit=True)
 
         if self.session.base_idx is None or self.session.tip_idx is None:
-            QMessageBox.information(self, "提示", "请先完成叶基(B1)和叶尖(T1)选择（可选控制点）。")
+            QMessageBox.information(self, self.tr("提示"), self.tr("请先完成叶基(B1)和叶尖(T1)选择（可选控制点）。"))
             return
 
         dlg = None
         try:
-            dlg = self._start_busy_dialog("正在生成叶长...")
+            dlg = self._start_busy_dialog(self.tr("正在生成叶长..."))
             self.session.compute_centerline_polyline(use_ctrl=True)
             self._update_lines()
             self.plotter.render()
             L = self.session.centerline_result.length if self.session.centerline_result else None
-            self._update_status(f"已生成叶长（使用控制点）：叶长={L:.6f}")
+            self._update_status(self.tr("已生成叶长（使用控制点）：叶长={length:.6f}", length=L))
             if self.session.current_inst_id is not None and self.session.centerline_result is not None:
                 self.session.commit_current(False)
         except Exception as e:
-            QMessageBox.critical(self, "生成叶长失败", str(e))
+            QMessageBox.critical(self, self.tr("生成叶长失败"), str(e))
         finally:
             self._finish_busy_dialog(dlg)
 

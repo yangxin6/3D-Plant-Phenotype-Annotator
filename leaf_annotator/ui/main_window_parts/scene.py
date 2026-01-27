@@ -105,14 +105,14 @@ class SceneMixin:
         xyz = self.session.get_full_xyz()
         poly = pv.PolyData(xyz)
 
-        mode = self.combo_view.currentText()
-        if mode == "RGB" and self.session.has_rgb():
+        mode = self._get_view_mode()
+        if mode == self.VIEW_RGB and self.session.has_rgb():
             poly["rgb"] = self.session.get_full_rgb()
-        elif mode == "语义":
+        elif mode == self.VIEW_SEM:
             poly["rgb"] = colors_from_labels(self.session.get_full_sem())
-        elif mode == "实例":
+        elif mode == self.VIEW_INST:
             poly["rgb"] = colors_from_labels(self.session.get_full_inst())
-        elif mode == "表型标签":
+        elif mode == self.VIEW_LABEL:
             full_labels = self._get_full_phenotype_labels()
             if full_labels is not None:
                 poly["rgb"] = colors_from_labels(full_labels)
@@ -149,6 +149,9 @@ class SceneMixin:
             self.A_VIEW_CENTER,
             self.A_LEAF_INCLINE_N, self.A_LEAF_INCLINE_Z, self.A_LEAF_INCLINE_ARC, self.A_LEAF_INCLINE_LABEL,
             self.A_LEAF_STEM_LEAF, self.A_LEAF_STEM_STEM, self.A_LEAF_STEM_ARC, self.A_LEAF_STEM_LABEL,
+            self.A_GROWTH_DIR, self.A_GROWTH_DIR_LABEL,
+            self.A_PLANT_HEIGHT, self.A_PLANT_HEIGHT_LABEL,
+            self.A_PLANT_CROWN, self.A_PLANT_CROWN_LABEL,
         ]:
             self._remove_actor(nm)
 
@@ -159,7 +162,7 @@ class SceneMixin:
     def _show_stem_only_scene(self):
         stem_pts = self._get_stem_points()
         if stem_pts is None or len(stem_pts) == 0:
-            QMessageBox.information(self, "提示", "没有可显示的茎点云，请检查茎语义选择。")
+            QMessageBox.information(self, self.tr("提示"), self.tr("没有可显示的茎点云，请检查茎语义选择。"))
             for btn in ["btn_toggle_stem_cyl", "btn_toggle_stem_path"]:
                 if hasattr(self, btn):
                     w = getattr(self, btn)
@@ -189,6 +192,9 @@ class SceneMixin:
             self.A_VIEW_CENTER, self.A_AABB, self.A_OBB,
             self.A_LEAF_INCLINE_N, self.A_LEAF_INCLINE_Z, self.A_LEAF_INCLINE_ARC, self.A_LEAF_INCLINE_LABEL,
             self.A_LEAF_STEM_LEAF, self.A_LEAF_STEM_STEM, self.A_LEAF_STEM_ARC, self.A_LEAF_STEM_LABEL,
+            self.A_GROWTH_DIR, self.A_GROWTH_DIR_LABEL,
+            self.A_PLANT_HEIGHT, self.A_PLANT_HEIGHT_LABEL,
+            self.A_PLANT_CROWN, self.A_PLANT_CROWN_LABEL,
         ]:
             self._remove_actor(nm)
 
@@ -237,6 +243,9 @@ class SceneMixin:
             self.A_OBB_DIM_L, self.A_OBB_DIM_W, self.A_OBB_DIM_H, self.A_OBB_DIM_LABELS,
             self.A_LEAF_INCLINE_N, self.A_LEAF_INCLINE_Z, self.A_LEAF_INCLINE_ARC, self.A_LEAF_INCLINE_LABEL,
             self.A_LEAF_STEM_LEAF, self.A_LEAF_STEM_STEM, self.A_LEAF_STEM_ARC, self.A_LEAF_STEM_LABEL,
+            self.A_GROWTH_DIR, self.A_GROWTH_DIR_LABEL,
+            self.A_PLANT_HEIGHT, self.A_PLANT_HEIGHT_LABEL,
+            self.A_PLANT_CROWN, self.A_PLANT_CROWN_LABEL,
         ]:
             self._remove_actor(nm)
         self._update_stem_cylinders(inst_ids=[int(inst_id)])
@@ -265,6 +274,9 @@ class SceneMixin:
             self.A_VIEW_CENTER, self.A_AABB, self.A_OBB,
             self.A_LEAF_INCLINE_N, self.A_LEAF_INCLINE_Z, self.A_LEAF_INCLINE_ARC, self.A_LEAF_INCLINE_LABEL,
             self.A_LEAF_STEM_LEAF, self.A_LEAF_STEM_STEM, self.A_LEAF_STEM_ARC, self.A_LEAF_STEM_LABEL,
+            self.A_GROWTH_DIR, self.A_GROWTH_DIR_LABEL,
+            self.A_PLANT_HEIGHT, self.A_PLANT_HEIGHT_LABEL,
+            self.A_PLANT_CROWN, self.A_PLANT_CROWN_LABEL,
         ]:
             self._remove_actor(nm)
         self._update_obb_dimension_display()
@@ -282,7 +294,7 @@ class SceneMixin:
         self._actor_cloud_full = None
 
         poly = pv.PolyData(ds)
-        if self.combo_view.currentText() == "表型标签" and self.session.point_labels is not None:
+        if self._get_view_mode() == self.VIEW_LABEL and self.session.point_labels is not None:
             src_idx = self.session.ds.src_indices.astype(np.int64)
             if len(self.session.point_labels) >= np.max(src_idx) + 1:
                 ds_labels = self.session.point_labels[src_idx]
@@ -478,7 +490,102 @@ class SceneMixin:
             3
         )
         dist = float(np.linalg.norm(self.temp_measure_p2 - self.temp_measure_p1))
-        self._update_status(f"测距结果：{dist:.6f}")
+        self._update_status(self.tr("测距结果：{dist:.6f}", dist=dist))
+
+    # ----------------------------
+    # growth direction / plant measurement
+    # ----------------------------
+
+    def _plant_scale(self) -> float:
+        if self.session.cloud is None:
+            return 0.1
+        pts = self.session.get_full_xyz()
+        if pts is None or len(pts) == 0:
+            return 0.1
+        diag = float(np.linalg.norm(pts.max(axis=0) - pts.min(axis=0)))
+        return max(diag * 0.25, 0.05)
+
+
+    def _update_growth_direction_display(self):
+        self._remove_actor(self.A_GROWTH_DIR)
+        self._remove_actor(self.A_GROWTH_DIR_LABEL)
+        if self.session.growth_direction is None:
+            return
+        if hasattr(self, "btn_toggle_growth_dir") and not self.btn_toggle_growth_dir.isChecked():
+            return
+        origin = self.session.growth_origin
+        direction = np.asarray(self.session.growth_direction, dtype=np.float64)
+        if origin is None:
+            pts = self.session.get_full_xyz()
+            if pts is None or len(pts) == 0:
+                return
+            proj = pts @ direction
+            origin = pts[int(np.argmin(proj))]
+        scale = self._plant_scale() * 1.6
+        p0 = np.asarray(origin, dtype=np.float64)
+        p1 = p0 + direction * scale
+        self._add_polyline_actor(self.A_GROWTH_DIR, np.asarray([p0, p1]), "purple", 4)
+        self._add_labels_actor(self.A_GROWTH_DIR_LABEL, np.asarray([p1]), [self.tr("Z轴")])
+
+
+    def _local_to_world(self, origin: np.ndarray, basis: np.ndarray, xyz_local: np.ndarray) -> np.ndarray:
+        return origin + xyz_local[0] * basis[:, 0] + xyz_local[1] * basis[:, 1] + xyz_local[2] * basis[:, 2]
+
+
+    def _update_plant_measurement_display(self):
+        self._remove_actor(self.A_PLANT_HEIGHT)
+        self._remove_actor(self.A_PLANT_HEIGHT_LABEL)
+        self._remove_actor(self.A_PLANT_CROWN)
+        self._remove_actor(self.A_PLANT_CROWN_LABEL)
+        if not hasattr(self.session, "plant_measurements"):
+            return
+        meas = self.session.plant_measurements or {}
+        ext = meas.get("extents")
+        if not isinstance(ext, dict):
+            return
+        show_height = True
+        show_crown = True
+        if hasattr(self, "btn_toggle_plant_height"):
+            show_height = self.btn_toggle_plant_height.isChecked()
+        if hasattr(self, "btn_toggle_plant_crown"):
+            show_crown = self.btn_toggle_plant_crown.isChecked()
+        if not show_height and not show_crown:
+            return
+
+        origin = meas.get("origin")
+        basis = meas.get("basis")
+        if origin is None:
+            origin = self.session.growth_origin
+        if basis is None:
+            basis = self.session.growth_basis
+        if origin is None or basis is None:
+            return
+        origin = np.asarray(origin, dtype=np.float64).reshape(3,)
+        basis = np.asarray(basis, dtype=np.float64).reshape(3, 3)
+
+        xmin = float(ext.get("x_min", 0.0))
+        xmax = float(ext.get("x_max", 0.0))
+        ymin = float(ext.get("y_min", 0.0))
+        ymax = float(ext.get("y_max", 0.0))
+        zmin = float(ext.get("z_min", 0.0))
+        zmax = float(ext.get("z_max", 0.0))
+
+        if show_height:
+            p0 = self._local_to_world(origin, basis, np.array([0.0, 0.0, zmin], dtype=np.float64))
+            p1 = self._local_to_world(origin, basis, np.array([0.0, 0.0, zmax], dtype=np.float64))
+            self._add_polyline_actor(self.A_PLANT_HEIGHT, np.asarray([p0, p1]), "magenta", 4)
+            height = meas.get("height", None)
+            label = self.tr("株高={height:.3f}", height=float(height)) if height is not None else self.tr("株高")
+            self._add_labels_actor(self.A_PLANT_HEIGHT_LABEL, np.asarray([(p0 + p1) / 2.0]), [label])
+
+        if show_crown:
+            zmid = 0.5 * (zmin + zmax)
+            p0 = self._local_to_world(origin, basis, np.array([xmin, ymin, zmid], dtype=np.float64))
+            p1 = self._local_to_world(origin, basis, np.array([xmax, ymax, zmid], dtype=np.float64))
+            self._add_polyline_actor(self.A_PLANT_CROWN, np.asarray([p0, p1]), "teal", 4)
+            crown = meas.get("crown_width", None)
+            label = self.tr("冠幅={crown:.3f}", crown=float(crown)) if crown is not None else self.tr("冠幅")
+            self._add_labels_actor(self.A_PLANT_CROWN_LABEL, np.asarray([(p0 + p1) / 2.0]), [label])
 
     # ----------------------------
     # lines
@@ -665,9 +772,9 @@ class SceneMixin:
     # ----------------------------
 
     def _refresh_scene(self, mode: str = None):
-        if mode is not None and self.combo_view.currentText() != mode:
+        if mode is not None and self._get_view_mode() != mode:
             self.combo_view.blockSignals(True)
-            self.combo_view.setCurrentText(mode)
+            self._set_combo_current_by_data(self.combo_view, mode)
             self.combo_view.blockSignals(False)
         if self.session.cloud is None:
             return
@@ -678,22 +785,28 @@ class SceneMixin:
             stem_only = True
         if stem_only:
             self._show_stem_only_scene()
+            self._update_growth_direction_display()
+            self._update_plant_measurement_display()
+            self.plotter.render()
             return
         if not self.annotating:
             self._show_browse_scene()
         else:
             self._show_annotate_scene()
-        mode_text = self.combo_view.currentText()
-        if mode_text == "RGB":
+        mode_text = self._get_view_mode()
+        if mode_text == self.VIEW_RGB:
             self.act_view_rgb.setChecked(True)
-        elif mode_text == "语义":
+        elif mode_text == self.VIEW_SEM:
             self.act_view_sem.setChecked(True)
-        elif mode_text == "实例":
+        elif mode_text == self.VIEW_INST:
             self.act_view_inst.setChecked(True)
-        elif mode_text == "表型标签":
+        elif mode_text == self.VIEW_LABEL:
             self.act_view_label.setChecked(True)
         self._refresh_bbox_actors()
         self._update_view_legend()
+        self._update_growth_direction_display()
+        self._update_plant_measurement_display()
+        self.plotter.render()
 
 
     def _color_for_label(self, label_id: int) -> np.ndarray:
@@ -721,16 +834,16 @@ class SceneMixin:
             self._set_view_legend([])
             return
 
-        mode = self.combo_view.currentText()
+        mode = self._get_view_mode()
         labels = []
-        if mode == "语义":
+        if mode == self.VIEW_SEM:
             if not self.annotating:
                 labels = np.unique(self.session.get_full_sem().astype(np.int64)).tolist()
             else:
                 labels = []
-        elif mode == "实例":
+        elif mode == self.VIEW_INST:
             labels = np.unique(self.session.get_full_inst().astype(np.int64)).tolist()
-        elif mode == "表型标签":
+        elif mode == self.VIEW_LABEL:
             if self.annotating:
                 if self.session.point_labels is not None:
                     labels = np.unique(self.session.point_labels.astype(np.int64)).tolist()
@@ -753,7 +866,7 @@ class SceneMixin:
     def _set_view_legend(self, labels):
         self._clear_layout(self.view_legend_layout)
         if not labels:
-            empty = QtWidgets.QLabel("无")
+            empty = QtWidgets.QLabel(self.tr("无"))
             empty.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
             self.view_legend_layout.addWidget(empty)
             return
@@ -940,21 +1053,21 @@ class SceneMixin:
         if not hasattr(self, "bbox_info"):
             return
         if self.session.cloud is None:
-            self.bbox_info.setText("AABB：-\nOBB：-")
+            self.bbox_info.setText(f"{self.tr('AABB：-')}\n{self.tr('OBB：-')}")
             return
         pts = self._get_bbox_points()
         if pts is None or len(pts) == 0:
-            self.bbox_info.setText("AABB：-\nOBB：-")
+            self.bbox_info.setText(f"{self.tr('AABB：-')}\n{self.tr('OBB：-')}")
             return
 
-        aabb_text = "AABB：-"
+        aabb_text = self.tr("AABB：-")
         if self.btn_toggle_aabb.isChecked():
             mins = pts.min(axis=0)
             maxs = pts.max(axis=0)
             lengths = (maxs - mins).tolist()
             aabb_text = f"AABB：L={lengths[0]:.3f} W={lengths[1]:.3f} H={lengths[2]:.3f}"
 
-        obb_text = "OBB：-"
+        obb_text = self.tr("OBB：-")
         if self.btn_toggle_obb.isChecked() and len(pts) >= 3:
             mean = pts.mean(axis=0)
             centered = pts - mean
