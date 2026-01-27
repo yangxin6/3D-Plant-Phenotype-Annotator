@@ -722,7 +722,7 @@ class ActionsMixin:
             self,
             self.tr("关于"),
             self.tr(
-                "版本：v0.1.0\n"
+                "版本：v0.1.1\n"
                 "开发人：杨鑫,苗腾\n"
                 "邮件：yangxinnc@163.com\n"
                 "单位：沈阳农业大学 信息与电气工程学院"
