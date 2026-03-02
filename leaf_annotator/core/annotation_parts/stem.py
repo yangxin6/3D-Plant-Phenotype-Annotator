@@ -3,6 +3,8 @@ from typing import Optional, Dict, Any, Tuple, List
 
 import numpy as np
 
+from core.annotation_parts.utils import _polyline_length
+
 
 class StemMixin:
     def _resolve_stem_segments(self, full_height: float, segments: Optional[int]) -> int:
@@ -217,6 +219,30 @@ class StemMixin:
             return None
         return prof.get("best")
 
+    def _compute_stem_length_from_growth(self, pts: np.ndarray) -> Optional[Dict[str, Any]]:
+        direction = getattr(self, "growth_direction", None)
+        if direction is None:
+            return None
+        axis = np.asarray(direction, dtype=np.float64)
+        norm = float(np.linalg.norm(axis))
+        if norm <= 1e-12:
+            return None
+        axis = axis / norm
+        t = pts @ axis
+        tmin = float(np.min(t))
+        tmax = float(np.max(t))
+        if tmax <= tmin:
+            return None
+        mean = pts.mean(axis=0)
+        origin = mean - axis * float(np.dot(mean, axis))
+        p1 = origin + axis * tmin
+        p2 = origin + axis * tmax
+        length = float(tmax - tmin)
+        return {
+            "length_path": [p1.tolist(), p2.tolist()],
+            "length": length,
+        }
+
 
     def compute_stem_structures(self) -> int:
         self._require_cloud()
@@ -242,9 +268,10 @@ class StemMixin:
                 ann["stem_segments"] = prof["segments"]
                 ok = True
             prof_len = self._compute_stem_profile(pts, segments=length_segments, percentile=length_pct)
-            if prof_len is not None:
-                ann["stem_length_path"] = prof_len["length_path"]
-                ann["stem_length"] = prof_len["length"]
+            length_res = self._compute_stem_length_from_growth(pts) or prof_len
+            if length_res is not None:
+                ann["stem_length_path"] = length_res["length_path"]
+                ann["stem_length"] = length_res["length"]
                 ok = True
             if ok:
                 count += 1
@@ -289,11 +316,12 @@ class StemMixin:
                 continue
             pts = self.get_instance_points(inst_id)
             prof = self._compute_stem_profile(pts, segments=length_segments, percentile=length_pct)
-            if prof is None:
+            length_res = self._compute_stem_length_from_growth(pts) or prof
+            if length_res is None:
                 continue
             ann = self._ensure_annotation_entry(inst_id)
-            ann["stem_length_path"] = prof["length_path"]
-            ann["stem_length"] = prof["length"]
+            ann["stem_length_path"] = length_res["length_path"]
+            ann["stem_length"] = length_res["length"]
             count += 1
         return count
 
@@ -319,11 +347,12 @@ class StemMixin:
         length_pct = self._get_stem_length_percentile()
         length_segments = getattr(self.params, "stem_length_segments", 0)
         prof = self._compute_stem_profile(pts, segments=length_segments, percentile=length_pct)
-        if prof is None:
+        length_res = self._compute_stem_length_from_growth(pts) or prof
+        if length_res is None:
             return False
         ann = self._ensure_annotation_entry(inst_id)
-        ann["stem_length_path"] = prof["length_path"]
-        ann["stem_length"] = prof["length"]
+        ann["stem_length_path"] = length_res["length_path"]
+        ann["stem_length"] = length_res["length"]
         return True
 
 
@@ -343,8 +372,9 @@ class StemMixin:
             ann["stem_segments"] = prof["segments"]
             ok = True
         prof_len = self._compute_stem_profile(pts, segments=length_segments, percentile=length_pct)
-        if prof_len is not None:
-            ann["stem_length_path"] = prof_len["length_path"]
-            ann["stem_length"] = prof_len["length"]
+        length_res = self._compute_stem_length_from_growth(pts) or prof_len
+        if length_res is not None:
+            ann["stem_length_path"] = length_res["length_path"]
+            ann["stem_length"] = length_res["length"]
             ok = True
         return ok
