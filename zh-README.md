@@ -3,6 +3,8 @@
 ## 项目简介
 用于植物点云的可视化、语义标注与表型测量，支持叶、茎、花、果多语义实例的标注与计算，并导出为 JSON 与标签文件。
 
+**Download:** [v0.2.0 Release](https://github.com/yangxin6/3D-Plant-Phenotype-Annotator/releases/tag/v0.2.0)
+
 ## 软件功能说明
 - 多视图显示：RGB、语义、实例、表型标签视图切换
 - 标注模式：实例选择、语义映射（叶/茎/花/果）与标注控制

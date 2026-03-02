@@ -3,6 +3,7 @@
 ## Overview
 A desktop tool for visualizing plant point clouds, annotating semantic instances (leaf, stem, flower, fruit), and measuring phenotypic traits. Exports annotations to JSON and label files.
 
+**Download:** [v0.2.0 Release](https://github.com/yangxin6/3D-Plant-Phenotype-Annotator/releases/tag/v0.2.0)
 ## Features
 - Multi-view rendering: RGB, Semantic, Instance, Phenotype Label modes
 - Annotation workflow: instance selection, semantic mapping (leaf/stem/flower/fruit), point picking
