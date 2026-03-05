@@ -48,6 +48,23 @@ def _normalize_label_desc(value: str) -> str:
 
 
 class IoMixin:
+    def scale_cloud(self, factor: float):
+        if self.cloud is None:
+            return
+        factor = float(factor)
+        if factor <= 0:
+            raise ValueError("scale factor must be > 0")
+        self.cloud.xyz = np.asarray(self.cloud.xyz, dtype=np.float64) * factor
+        self.annotations = {}
+        self.instance_meta = {}
+        self.full_point_labels = None
+        self.growth_origin = None
+        self.growth_direction = None
+        self.growth_basis = None
+        self.growth_method = None
+        self.plant_measurements = {}
+        self.clear_instance_state()
+
     def load(self, path: str):
         arr = PointCloudIO.load_array(path)
         self.cloud = CloudParser.parse(arr, self.schema)

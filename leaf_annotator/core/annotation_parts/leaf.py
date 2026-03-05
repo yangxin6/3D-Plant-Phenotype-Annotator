@@ -275,59 +275,34 @@ class LeafMixin:
         self._require_instance()
         self._require_width_endpoints()
 
+        path_pts, path_idx = self.build_width_polyline()
+        if path_idx is None or len(path_idx) < 2:
+            raise RuntimeError("叶宽路径过短，无法生成。")
+
+        path_idx = np.asarray(path_idx, dtype=np.int64)
+        self.width_path_points = path_pts
+        self.width_path_length = _polyline_length(path_pts)
+        self.width_path_indices = path_idx
+
+
+    def build_width_polyline(self) -> Tuple[Optional[np.ndarray], Optional[List[int]]]:
+        self._require_instance()
+        self._require_width_endpoints()
+
         pts = self.ds.points
         chain: List[int] = [int(self.width_w1_idx)]
         if len(self.width_ctrl_indices) > 0:
             chain += [int(i) for i in self.get_sorted_width_ctrl_indices()]
         chain.append(int(self.width_w2_idx))
 
-        def _try_path(graph_builder) -> Optional[List[int]]:
-            path_all: List[int] = []
-            G = graph_builder()
-            for a, b in zip(chain[:-1], chain[1:]):
-                pidx = _shortest_path_indices(G, int(a), int(b))
-                if pidx is None or len(pidx) == 0:
-                    return None
-                if path_all:
-                    pidx = pidx[1:]
-                path_all.extend([int(i) for i in pidx])
-            return path_all
-
-        path_all = None
-        base_radius = float(self.params.graph_radius)
-        radius_trials = [base_radius, base_radius * 1.5, base_radius * 2.0, base_radius * 3.0, base_radius * 4.0]
-        for radius in radius_trials:
-            if radius <= 0:
-                continue
-            path_all = _try_path(lambda r=radius: _build_radius_graph(pts, radius=r))
-            if path_all:
-                break
-
-        if not path_all:
-            n = int(pts.shape[0])
-            base_k = max(3, int(self.params.k))
-            k_trials = [base_k, base_k * 2, base_k * 3, max(base_k, n - 1)]
-            for k in k_trials:
-                if k <= 0:
-                    continue
-                kk = min(int(k), max(1, n - 1))
-                if kk <= 0:
-                    continue
-                path_all = _try_path(lambda kk=kk: _build_knn_graph(pts, k=kk))
-                if path_all:
-                    break
-
-        if not path_all:
-            raise RuntimeError("叶宽最短路径不可达，请调整 W1/W2 或增加 graph_radius/k。")
-
+        path_all: List[int] = []
+        for idx in chain:
+            if not path_all or path_all[-1] != int(idx):
+                path_all.append(int(idx))
         if len(path_all) < 2:
-            raise RuntimeError("叶宽路径过短，无法生成。")
-
+            return None, None
         path_idx = np.asarray(path_all, dtype=np.int64)
-        path_pts = pts[path_idx]
-        self.width_path_points = path_pts
-        self.width_path_length = _polyline_length(path_pts)
-        self.width_path_indices = path_idx
+        return pts[path_idx], path_all
 
 
     def _get_length_polyline_for_area(self) -> np.ndarray:

@@ -171,23 +171,6 @@ class AnnotationMixin:
         try:
             dlg = self._start_busy_dialog(self.tr("正在生成叶宽..."))
             self.session.compute_width_path()
-            path_idx = getattr(self.session, "width_path_indices", None)
-            if path_idx is not None and len(path_idx) > 0:
-                w1 = getattr(self.session, "width_w1_idx", None)
-                w2 = getattr(self.session, "width_w2_idx", None)
-                ctrl_idx = []
-                seen = set()
-                for idx in path_idx:
-                    i = int(idx)
-                    if i == w1 or i == w2:
-                        continue
-                    if i in seen:
-                        continue
-                    seen.add(i)
-                    ctrl_idx.append(i)
-                self.session.width_ctrl_indices = ctrl_idx
-                self.session.width_ctrl_ids = [10 * (i + 1) for i in range(len(ctrl_idx))]
-                self.session._next_width_ctrl_id = 10 * (len(ctrl_idx) + 1) if len(ctrl_idx) > 0 else 10
             self._update_lines()
             self.plotter.render()
             self._update_markers_saved()

@@ -3,6 +3,8 @@ import numpy as np
 from PyQt5 import QtWidgets, QtCore
 from PyQt5.QtWidgets import QMessageBox
 
+from core.annotation_parts.utils import _polyline_length
+
 
 class InteractionMixin:
     def _install_vtk_pick_observer(self):
@@ -242,6 +244,14 @@ class InteractionMixin:
             if self.pick_mode == self.MODE_WIDTH_CTRL:
                 self._exit_current_mode(commit=True)
                 self._invalidate_results_after_point_change()
+                if getattr(self.session, "width_path_points", None) is not None:
+                    path_pts, path_idx = self.session.build_width_polyline()
+                    if path_pts is not None and path_idx is not None:
+                        self.session.width_path_points = path_pts
+                        self.session.width_path_indices = np.asarray(path_idx, dtype=np.int64)
+                        self.session.width_path_length = _polyline_length(path_pts)
+                        self._update_lines()
+                        self.plotter.render()
                 self._update_status(self.tr("叶宽控制点选择关闭：已保存。"))
 
 

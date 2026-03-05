@@ -204,6 +204,9 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow, UiStateMixin, SemanticMixin, Sc
         else:
             self.act_lang_zh.setChecked(True)
 
+        self.menu_scale = menu.addMenu(self.tr("缩放"))
+        self.act_scale_cloud = self.menu_scale.addAction(self.tr("缩放点云"))
+
         schema = CloudSchema(xyz_slice=slice(0, 3), sem_col=-2, inst_col=-1, rgb_slice=slice(3, 6))
         self.session = LeafAnnotationSession(params=AnnotationParams(), schema=schema)
         self.annotate_semantic = "leaf"
@@ -663,6 +666,7 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow, UiStateMixin, SemanticMixin, Sc
         self.act_growth_manual.triggered.connect(self.on_growth_manual)
         self.act_growth_stem.triggered.connect(self.on_growth_stem)
         self.act_measure_plant.triggered.connect(self.on_measure_plant)
+        self.act_scale_cloud.triggered.connect(self.on_scale_cloud)
         self.btn_view_front.clicked.connect(self.on_view_front)
         self.btn_view_side.clicked.connect(self.on_view_side)
         self.btn_view_top.clicked.connect(self.on_view_top)
@@ -773,6 +777,8 @@ class LeafAnnotatorWindow(QtWidgets.QMainWindow, UiStateMixin, SemanticMixin, Sc
         self.menu_calc.setTitle(self.tr("计算"))
         self.menu_plant.setTitle(self.tr("植物类型"))
         self.menu_lang.setTitle(self.tr("语言"))
+        self.menu_scale.setTitle(self.tr("缩放"))
+        self.act_scale_cloud.setText(self.tr("缩放点云"))
         self.act_load.setText(self.tr("加载点云"))
         self.act_export_dir.setText(self.tr("导出目录"))
         self.act_export_phenotype.setText(self.tr("导出表型CSV"))

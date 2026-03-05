@@ -8,6 +8,58 @@ from PyQt5.QtWidgets import QFileDialog, QMessageBox
 
 
 class ActionsMixin:
+    def on_scale_cloud(self):
+        if self.session.cloud is None:
+            return
+        factor, ok = QtWidgets.QInputDialog.getDouble(
+            self,
+            self.tr("缩放点云"),
+            self.tr("缩放倍数（例如 0.1 表示缩小 10 倍）："),
+            value=1.0,
+            min=0.000001,
+            max=1000000.0,
+            decimals=6,
+        )
+        if not ok:
+            return
+        factor = float(factor)
+        if abs(factor - 1.0) < 1e-12:
+            return
+        confirm = QMessageBox.question(
+            self,
+            self.tr("缩放点云"),
+            self.tr("将点云缩放为原来的 {factor} 倍，当前标注和测量将被清空，是否继续？", factor=factor),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        try:
+            self.session.scale_cloud(factor)
+        except Exception as e:
+            QMessageBox.critical(self, self.tr("计算失败"), self.tr(str(e)))
+            return
+
+        self.annotating = False
+        self.pick_mode = self.MODE_NONE
+        self.temp_base_idx = None
+        self.temp_tip_idx = None
+        self.temp_ctrl_indices = []
+        self.temp_w1_idx = None
+        self.temp_w2_idx = None
+        self.temp_width_ctrl_indices = []
+        self.temp_measure_p1 = None
+        self.temp_measure_p2 = None
+
+        self._update_buttons()
+        self._refresh_scene()
+        self._refresh_point_lists()
+        self._refresh_instance_meta_ui()
+        self._update_instance_sem_label()
+        self._update_view_legend()
+        self._update_phenotype_table()
+        self._update_status(self.tr("已缩放点云：{factor} 倍。", factor=factor))
+
     def on_select_instance_menu(self):
         if self.session.cloud is None or self.combo_inst.count() == 0:
             QMessageBox.information(self, self.tr("提示"), self.tr("当前没有可选实例。"))

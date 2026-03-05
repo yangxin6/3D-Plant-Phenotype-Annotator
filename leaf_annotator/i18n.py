@@ -207,7 +207,7 @@ class I18n:
                 "视图与显示": "View & Display",
                 "导出与快捷键": "Export & Shortcuts",
                 "提示：先开启对应拾取模式再点击点云": "Tip: enable a picking mode before clicking the cloud.",
-                "版本：v0.2.1\n开发人：杨鑫,苗腾\n邮件：yangxinnc@163.com\n单位：沈阳农业大学 信息与电气工程学院": "Version: v0.2.1\nDevelopers: Yang Xin, Miao Teng\nEmail: yangxinnc@163.com\nAffiliation: Shenyang Agricultural University, School of Information and Electrical Engineering",
+                "版本：v0.2.2\n开发人：杨鑫,苗腾\n邮件：yangxinnc@163.com\n单位：沈阳农业大学 信息与电气工程学院": "Version: v0.2.2\nDevelopers: Yang Xin, Miao Teng\nEmail: yangxinnc@163.com\nAffiliation: Shenyang Agricultural University, School of Information and Electrical Engineering",
                 "生长方向：Shift+左键选择最低点。": "Growth direction: Shift+Left click to pick the lowest point.",
                 "生长方向：已默认最低点，可 Shift+左键重新选择最低点；再选择旋转轴进行对齐。": "Growth direction: default lowest point set; Shift+Left click to change. Then choose rotation axis to align.",
                 "已设置生长方向基准点：可旋转对准生长方向。": "Growth direction base set: rotate to align.",
@@ -376,6 +376,13 @@ class I18n:
                     "Display modes: RGB / Semantic / Instance / Phenotype Labels",
                 "保存标注：Ctrl + S；导出表型 CSV；导出标注点云":
                     "Save annotations: Ctrl+S; export phenotype CSV; export labeled cloud",
+                "缩放": "Scale",
+                "缩放点云": "Scale Point Cloud",
+                "缩放倍数（例如 0.1 表示缩小 10 倍）：":
+                    "Scale factor (e.g. 0.1 means 10x smaller):",
+                "将点云缩放为原来的 {factor} 倍，当前标注和测量将被清空，是否继续？":
+                    "Scale the cloud by {factor}. Current annotations and measurements will be cleared. Continue?",
+                "已缩放点云：{factor} 倍。": "Point cloud scaled by {factor}.",
             }
         }
 

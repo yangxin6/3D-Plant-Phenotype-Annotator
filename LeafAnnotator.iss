@@ -1,6 +1,6 @@
 [Setup]
 AppName=植物表型标注工具
-AppVersion=0.2.1
+AppVersion=0.2.2
 DefaultDirName={autopf}\植物表型标注工具
 DefaultGroupName=植物表型标注工具
 OutputDir=dist_installer
