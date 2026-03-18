@@ -1,4 +1,7 @@
 # ui/main_window_parts/actions.py
+import copy
+import csv
+import json
 import os
 
 import numpy as np
@@ -6,8 +9,254 @@ from PyQt5 import QtWidgets
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QFileDialog, QMessageBox
 
+from core.io import PointCloudIO
+
 
 class ActionsMixin:
+    def _iter_point_cloud_files(self, folder: str):
+        exts = {ext.lower() for ext in PointCloudIO.SUPPORTED}
+        files = []
+        for name in sorted(os.listdir(folder)):
+            path = os.path.join(folder, name)
+            if not os.path.isfile(path):
+                continue
+            if os.path.splitext(name)[1].lower() in exts:
+                files.append(path)
+        return files
+
+
+    def _resolve_batch_json_path(self, cloud_path: str, export_dir: str) -> str:
+        base = os.path.splitext(os.path.basename(cloud_path))[0]
+        cloud_json = os.path.join(os.path.dirname(cloud_path), f"{base}.json")
+        export_json = os.path.join(export_dir, f"{base}.json")
+        if os.path.isfile(cloud_json):
+            return cloud_json
+        if os.path.isfile(export_json):
+            return export_json
+        return export_json
+
+
+    def _apply_semantic_fallback(self, session_obj):
+        fallback = getattr(self.session, "semantic_map", {}) or {}
+        for key in ["leaf", "stem", "flower", "fruit"]:
+            if session_obj.semantic_map.get(key) is None and fallback.get(key) is not None:
+                session_obj.semantic_map[key] = int(fallback[key])
+        if not getattr(session_obj, "plant_type", None):
+            session_obj.plant_type = self.session.plant_type
+
+
+    def _rows_from_json_data(self, data: dict, file_name: str):
+        rows = []
+        plant_meas = data.get("plant_measurements") or {}
+        height = plant_meas.get("height")
+        crown = plant_meas.get("crown_width")
+        if height is not None:
+            rows.append([file_name, self.tr("整株"), "-", self.tr("株高"), f"{float(height):.3f}"])
+        if crown is not None:
+            rows.append([file_name, self.tr("整株"), "-", self.tr("冠幅"), f"{float(crown):.3f}"])
+
+        for ann in data.get("annotations", []):
+            inst_id = ann.get("inst_id", "")
+            if ann.get("stem_diameter") is not None:
+                rows.append([file_name, str(inst_id), self.tr("茎"), self.tr("茎粗"), f"{float(ann['stem_diameter']):.3f}"])
+            if ann.get("stem_length") is not None:
+                rows.append([file_name, str(inst_id), self.tr("茎"), self.tr("茎长"), f"{float(ann['stem_length']):.3f}"])
+            if ann.get("length") is not None:
+                rows.append([file_name, str(inst_id), self.tr("叶"), self.tr("叶长"), f"{float(ann['length']):.3f}"])
+            if ann.get("width_path_length") is not None:
+                rows.append([file_name, str(inst_id), self.tr("叶"), self.tr("叶宽"), f"{float(ann['width_path_length']):.3f}"])
+            if ann.get("leaf_area") is not None:
+                rows.append([file_name, str(inst_id), self.tr("叶"), self.tr("叶面积"), f"{float(ann['leaf_area']):.3f}"])
+            if ann.get("leaf_projected_area") is not None:
+                rows.append([file_name, str(inst_id), self.tr("叶"), self.tr("投影面积"), f"{float(ann['leaf_projected_area']):.3f}"])
+            if ann.get("leaf_inclination") is not None:
+                rows.append([file_name, str(inst_id), self.tr("叶"), self.tr("叶倾角"), f"{float(ann['leaf_inclination']):.1f}"])
+            if ann.get("leaf_stem_angle") is not None:
+                rows.append([file_name, str(inst_id), self.tr("叶"), self.tr("叶夹角"), f"{float(ann['leaf_stem_angle']):.1f}"])
+            flower_obb = ann.get("flower_obb")
+            if isinstance(flower_obb, dict):
+                lengths = flower_obb.get("lengths")
+                if lengths is not None and len(lengths) == 3:
+                    rows.append([file_name, str(inst_id), self.tr("花"), self.tr("花OBB"), f"{lengths[0]:.3f},{lengths[1]:.3f},{lengths[2]:.3f}"])
+            fruit_obb = ann.get("fruit_obb")
+            if isinstance(fruit_obb, dict):
+                lengths = fruit_obb.get("lengths")
+                if lengths is not None and len(lengths) == 3:
+                    rows.append([file_name, str(inst_id), self.tr("果"), self.tr("果OBB"), f"{lengths[0]:.3f},{lengths[1]:.3f},{lengths[2]:.3f}"])
+        return rows
+
+
+    def on_batch_compute_quick(self):
+        cloud_dir = QFileDialog.getExistingDirectory(
+            self,
+            self.tr("选择点云目录"),
+            self._settings.value("last_dir", "", type=str),
+        )
+        if not cloud_dir:
+            return
+        export_dir = QFileDialog.getExistingDirectory(
+            self,
+            self.tr("选择批量JSON导出目录"),
+            self._settings.value("export_dir", cloud_dir, type=str) or cloud_dir,
+        )
+        if not export_dir:
+            return
+        cloud_files = self._iter_point_cloud_files(cloud_dir)
+        if not cloud_files:
+            QMessageBox.information(self, self.tr("提示"), self.tr("所选目录中没有可处理的点云文件。"))
+            return
+
+        QMessageBox.information(
+            self,
+            self.tr("批量快速计算"),
+            self.tr(
+                "批量快速计算步骤：\n"
+                "1. 逐个读取点云；\n"
+                "2. 读取或创建同名 JSON；\n"
+                "3. 自动计算生长方向；\n"
+                "4. 计算茎粗、茎长、株高、冠幅；\n"
+                "5. 保存回对应 JSON。"
+            ),
+        )
+
+        dlg = None
+        processed = 0
+        skipped = []
+        try:
+            dlg = self._start_busy_dialog(self.tr("正在批量计算表型..."))
+            session_cls = self.session.__class__
+            for idx, cloud_path in enumerate(cloud_files, 1):
+                if dlg is not None:
+                    dlg.setLabelText(self.tr("正在处理：{name} ({index}/{total})", name=os.path.basename(cloud_path), index=idx, total=len(cloud_files)))
+                    QtWidgets.QApplication.processEvents()
+                self._update_status(self.tr("批量计算：准备处理 {name} ({index}/{total})", name=os.path.basename(cloud_path), index=idx, total=len(cloud_files)))
+                batch_session = session_cls(params=copy.deepcopy(self.session.params), schema=copy.deepcopy(self.session.schema))
+                if dlg is not None:
+                    dlg.setLabelText(self.tr("步骤 1/5：读取点云 {name}", name=os.path.basename(cloud_path)))
+                    QtWidgets.QApplication.processEvents()
+                batch_session.load(cloud_path)
+                json_path = self._resolve_batch_json_path(cloud_path, export_dir)
+                if dlg is not None:
+                    dlg.setLabelText(self.tr("步骤 2/5：读取或创建 JSON {name}", name=os.path.basename(json_path)))
+                    QtWidgets.QApplication.processEvents()
+                if os.path.isfile(json_path):
+                    try:
+                        batch_session.load_annotations_json(json_path)
+                    except Exception:
+                        pass
+                self._apply_semantic_fallback(batch_session)
+                if batch_session.semantic_map.get("stem") is None:
+                    skipped.append(f"{os.path.basename(cloud_path)}: {self.tr('未设置茎语义标签')}")
+                    continue
+                try:
+                    if dlg is not None:
+                        dlg.setLabelText(self.tr("步骤 3/5：计算生长方向 {name}", name=os.path.basename(cloud_path)))
+                        QtWidgets.QApplication.processEvents()
+                    batch_session.compute_growth_direction_from_stem()
+                    if dlg is not None:
+                        dlg.setLabelText(self.tr("步骤 4/5：计算茎粗、茎长、株高、冠幅 {name}", name=os.path.basename(cloud_path)))
+                        QtWidgets.QApplication.processEvents()
+                    batch_session.compute_stem_diameter_structures()
+                    batch_session.compute_stem_length_structures()
+                    batch_session.compute_plant_height_crown()
+                    if dlg is not None:
+                        dlg.setLabelText(self.tr("步骤 5/5：保存 JSON {name}", name=os.path.basename(json_path)))
+                        QtWidgets.QApplication.processEvents()
+                    batch_session.export_all_json(json_path)
+                    processed += 1
+                    self._update_status(self.tr("批量计算：已完成 {name}", name=os.path.basename(cloud_path)))
+                except Exception as e:
+                    skipped.append(f"{os.path.basename(cloud_path)}: {e}")
+        finally:
+            self._finish_busy_dialog(dlg)
+
+        msg = self.tr("批量计算完成：成功 {count} 个。", count=processed)
+        if skipped:
+            tail = "\n".join(skipped[:10])
+            if len(skipped) > 10:
+                tail += f"\n... (+{len(skipped)-10})"
+            msg = f"{msg}\n{self.tr('跳过/失败：')}\n{tail}"
+        QMessageBox.information(self, self.tr("完成"), msg)
+        self._update_status(msg)
+
+
+    def on_batch_export_phenotype_csv(self):
+        json_dir = QFileDialog.getExistingDirectory(
+            self,
+            self.tr("选择JSON目录"),
+            self._settings.value("export_dir", self._settings.value("last_dir", "", type=str), type=str),
+        )
+        if not json_dir:
+            return
+        json_files = [
+            os.path.join(json_dir, name)
+            for name in sorted(os.listdir(json_dir))
+            if os.path.isfile(os.path.join(json_dir, name)) and name.lower().endswith('.json')
+        ]
+        if not json_files:
+            QMessageBox.information(self, self.tr("提示"), self.tr("所选目录中没有JSON文件。"))
+            return
+
+        QMessageBox.information(
+            self,
+            self.tr("批量导出表型CSV"),
+            self.tr(
+                "批量导出 CSV 步骤：\n"
+                "1. 扫描目录中的 JSON；\n"
+                "2. 逐个读取表型数据；\n"
+                "3. 汇总为一个 CSV 文件。"
+            ),
+        )
+
+        default_csv = os.path.join(json_dir, "batch_phenotypes.csv")
+        out_path, _ = QFileDialog.getSaveFileName(
+            self,
+            self.tr("批量导出表型CSV"),
+            default_csv,
+            "CSV (*.csv);;All (*.*)"
+        )
+        if not out_path:
+            return
+
+        rows = []
+        skipped = []
+        dlg = None
+        try:
+            dlg = self._start_busy_dialog(self.tr("正在批量导出表型CSV..."))
+            for idx, path in enumerate(json_files, 1):
+                if dlg is not None:
+                    dlg.setLabelText(self.tr("步骤 1/3：读取 JSON {name} ({index}/{total})", name=os.path.basename(path), index=idx, total=len(json_files)))
+                    QtWidgets.QApplication.processEvents()
+                self._update_status(self.tr("批量导出：读取 {name} ({index}/{total})", name=os.path.basename(path), index=idx, total=len(json_files)))
+                try:
+                    with open(path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    if dlg is not None:
+                        dlg.setLabelText(self.tr("步骤 2/3：提取表型数据 {name}", name=os.path.basename(path)))
+                        QtWidgets.QApplication.processEvents()
+                    rows.extend(self._rows_from_json_data(data, os.path.basename(path)))
+                except Exception as e:
+                    skipped.append(f"{os.path.basename(path)}: {e}")
+            if not rows:
+                QMessageBox.information(self, self.tr("提示"), self.tr("未找到可导出的表型数据。"))
+                return
+
+            if dlg is not None:
+                dlg.setLabelText(self.tr("步骤 3/3：写出 CSV {name}", name=os.path.basename(out_path)))
+                QtWidgets.QApplication.processEvents()
+            with open(out_path, 'w', encoding='utf-8-sig', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([self.tr("文件"), self.tr("实例"), self.tr("语义"), self.tr("表型名字"), self.tr("表型值")])
+                writer.writerows(rows)
+        finally:
+            self._finish_busy_dialog(dlg)
+
+        msg = self.tr("已批量导出表型数据：{path}", path=out_path)
+        if skipped:
+            msg = f"{msg}\n{self.tr('跳过/失败：{count}', count=len(skipped))}"
+        QMessageBox.information(self, self.tr("完成"), msg)
+        self._update_status(msg)
+
     def on_scale_cloud(self):
         if self.session.cloud is None:
             return
@@ -233,6 +482,10 @@ class ActionsMixin:
                 return
             finally:
                 self._finish_busy_dialog(dlg)
+            if hasattr(self, "btn_toggle_stem_cyl"):
+                self.btn_toggle_stem_cyl.blockSignals(True)
+                self.btn_toggle_stem_cyl.setChecked(True)
+                self.btn_toggle_stem_cyl.blockSignals(False)
             self._update_buttons()
             self._refresh_scene()
             self._refresh_point_lists()
@@ -332,6 +585,10 @@ class ActionsMixin:
                     self.session.compute_stem_instance(inst_id)
                 finally:
                     self._finish_busy_dialog(dlg)
+                if hasattr(self, "btn_toggle_stem_cyl"):
+                    self.btn_toggle_stem_cyl.blockSignals(True)
+                    self.btn_toggle_stem_cyl.setChecked(True)
+                    self.btn_toggle_stem_cyl.blockSignals(False)
                 self._update_buttons()
                 self._refresh_scene()
                 self._refresh_point_lists()
@@ -484,7 +741,10 @@ class ActionsMixin:
             return
         finally:
             self._finish_busy_dialog(dlg)
-        if self.btn_toggle_stem_cyl.isChecked():
+        if hasattr(self, "btn_toggle_stem_cyl"):
+            self.btn_toggle_stem_cyl.blockSignals(True)
+            self.btn_toggle_stem_cyl.setChecked(True)
+            self.btn_toggle_stem_cyl.blockSignals(False)
             self._update_stem_cylinders()
             self.plotter.render()
         self._update_phenotype_table()

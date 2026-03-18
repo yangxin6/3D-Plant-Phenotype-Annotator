@@ -2,8 +2,7 @@
 from typing import Optional, Dict, Any, Tuple, List
 
 import numpy as np
-
-from core.annotation_parts.utils import _polyline_length
+from scipy.spatial import cKDTree
 
 
 class StemMixin:
@@ -41,6 +40,132 @@ class StemMixin:
         return float(pct)
 
 
+    def _normalize_axis(self, axis: np.ndarray) -> Optional[np.ndarray]:
+        if axis is None:
+            return None
+        axis = np.asarray(axis, dtype=np.float64).reshape(-1)
+        if axis.shape[0] != 3:
+            return None
+        norm = float(np.linalg.norm(axis))
+        if norm <= 1e-12:
+            return None
+        axis = axis / norm
+        if axis[2] < 0:
+            axis = -axis
+        return axis
+
+
+    def _get_stem_axis(self, pts: np.ndarray) -> Optional[np.ndarray]:
+        growth_axis = self._normalize_axis(getattr(self, "growth_direction", None))
+        if growth_axis is not None:
+            return growth_axis
+        if pts is None or len(pts) < 3:
+            return None
+        centered = pts - pts.mean(axis=0)
+        cov = np.cov(centered, rowvar=False)
+        eigvals, eigvecs = np.linalg.eigh(cov)
+        axis = eigvecs[:, int(np.argmax(eigvals))]
+        return self._normalize_axis(axis)
+
+
+    def _mad_sigma(self, values: np.ndarray) -> float:
+        if values is None or len(values) == 0:
+            return 0.0
+        med = float(np.median(values))
+        mad = float(np.median(np.abs(values - med)))
+        return 1.4826 * mad
+
+
+    def _remove_knn_outliers(self, pts: np.ndarray, k: int = 8, sigma_scale: float = 2.5) -> np.ndarray:
+        if pts is None or len(pts) < 12:
+            return pts
+        kk = min(max(2, int(k)), len(pts) - 1)
+        if kk < 2:
+            return pts
+        tree = cKDTree(pts)
+        dists, _ = tree.query(pts, k=kk + 1)
+        neigh_dist = np.asarray(dists[:, -1], dtype=np.float64)
+        med = float(np.median(neigh_dist))
+        sigma = self._mad_sigma(neigh_dist)
+        if sigma <= 1e-12:
+            return pts
+        keep = neigh_dist <= med + sigma_scale * sigma
+        if np.sum(keep) < max(10, len(pts) // 3):
+            return pts
+        return pts[keep]
+
+
+    def _trim_axial_outliers(self, pts: np.ndarray, axis: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float, float]:
+        origin = pts.mean(axis=0)
+        t = (pts - origin) @ axis
+        if len(pts) >= 50:
+            t_lo, t_hi = np.percentile(t, [1.0, 99.0])
+            keep = (t >= float(t_lo)) & (t <= float(t_hi))
+            if np.sum(keep) >= max(10, len(pts) // 2):
+                pts = pts[keep]
+                origin = pts.mean(axis=0)
+                t = (pts - origin) @ axis
+        return pts, origin, t, float(t.min()), float(t.max())
+
+
+    def _radial_distance_to_axis(self, pts: np.ndarray, axis: np.ndarray, origin: np.ndarray) -> np.ndarray:
+        rel = pts - origin
+        proj = rel @ axis
+        perp = rel - np.outer(proj, axis)
+        return np.linalg.norm(perp, axis=1)
+
+
+    def _remove_radial_outliers(self, pts: np.ndarray, axis: np.ndarray, origin: np.ndarray, sigma_scale: float = 2.5) -> np.ndarray:
+        if pts is None or len(pts) < 12:
+            return pts
+        radial = self._radial_distance_to_axis(pts, axis, origin)
+        med = float(np.median(radial))
+        sigma = self._mad_sigma(radial)
+        if sigma <= 1e-12:
+            keep = radial <= np.percentile(radial, 95.0)
+        else:
+            keep = radial <= med + sigma_scale * sigma
+        if np.sum(keep) < max(10, len(pts) // 3):
+            return pts
+        return pts[keep]
+
+
+    def _denoise_stem_points(self, pts: np.ndarray, axis: np.ndarray) -> np.ndarray:
+        pts_work = np.asarray(pts, dtype=np.float64)
+        pts_work = self._remove_knn_outliers(pts_work)
+        if len(pts_work) < 10:
+            return np.asarray(pts, dtype=np.float64)
+        origin = pts_work.mean(axis=0)
+        pts_work = self._remove_radial_outliers(pts_work, axis, origin)
+        if len(pts_work) < 10:
+            return np.asarray(pts, dtype=np.float64)
+        return pts_work
+
+
+    def _compute_segment_radius(
+        self,
+        seg_pts: np.ndarray,
+        axis: np.ndarray,
+        percentile: float,
+    ) -> Optional[float]:
+        if seg_pts is None or len(seg_pts) < 6:
+            return None
+        origin = seg_pts.mean(axis=0)
+        radial = self._radial_distance_to_axis(seg_pts, axis, origin)
+        if len(radial) < 3:
+            return None
+        med = float(np.median(radial))
+        sigma = self._mad_sigma(radial)
+        if sigma > 1e-12:
+            keep = radial <= med + 2.5 * sigma
+            if np.sum(keep) >= 4:
+                radial = radial[keep]
+        radius = float(np.percentile(radial, float(percentile)))
+        if not np.isfinite(radius) or radius <= 0.0:
+            return None
+        return radius
+
+
     def _compute_stem_profile(
         self,
         pts: np.ndarray,
@@ -49,18 +174,19 @@ class StemMixin:
     ) -> Optional[Dict[str, Any]]:
         if pts is None or len(pts) < 10:
             return None
-        mean = pts.mean(axis=0)
-        centered = pts - mean
-        cov = np.cov(centered, rowvar=False)
-        eigvals, eigvecs = np.linalg.eigh(cov)
-        axis = eigvecs[:, int(np.argmax(eigvals))]
-        axis = axis / (np.linalg.norm(axis) + 1e-12)
+        axis = self._get_stem_axis(pts)
+        if axis is None:
+            return None
+        pts_work = self._denoise_stem_points(pts, axis)
+        if pts_work is None or len(pts_work) < 10:
+            return None
+        pts_work, origin, t, tmin, tmax = self._trim_axial_outliers(pts_work, axis)
+        if len(pts_work) < 10 or tmax <= tmin:
+            return None
 
-        t = centered @ axis
-        tmin, tmax = float(t.min()), float(t.max())
-        full_height = max(0.0, tmax - tmin)
         if percentile is None:
             percentile = self._get_stem_diameter_percentile()
+        full_height = float(tmax - tmin)
         if segments is None:
             segments = 0
         try:
@@ -73,143 +199,85 @@ class StemMixin:
             except Exception:
                 seg_val = 0
         seg_count = self._resolve_stem_segments(full_height, seg_val)
-        pct = float(percentile)
+        edges = np.linspace(tmin, tmax, seg_count + 1) if seg_count > 1 else np.array([tmin, tmax], dtype=np.float64)
+        min_pts = max(8, int(np.ceil(len(pts_work) / max(8.0, 2.0 * seg_count))))
 
-        ref = np.array([1.0, 0.0, 0.0], dtype=np.float64)
-        if abs(float(axis[0])) > 0.9:
-            ref = np.array([0.0, 1.0, 0.0], dtype=np.float64)
-        u = np.cross(axis, ref)
-        u = u / (np.linalg.norm(u) + 1e-12)
-        v = np.cross(axis, u)
-
-        def _fit_circle(xs: np.ndarray, ys: np.ndarray) -> Optional[Tuple[float, float, float]]:
-            if len(xs) < 3:
-                return None
-            A = np.column_stack([xs, ys, np.ones_like(xs)])
-            b = -(xs ** 2 + ys ** 2)
-            try:
-                params, *_ = np.linalg.lstsq(A, b, rcond=None)
-                a, bcoef, c = params
-                cx = -a / 2.0
-                cy = -bcoef / 2.0
-                r2 = cx * cx + cy * cy - c
-            except Exception:
-                return None
-            if r2 <= 0:
-                cx = 0.0
-                cy = 0.0
-            d = np.sqrt((xs - cx) ** 2 + (ys - cy) ** 2)
-            radius = float(np.percentile(d, pct))
-            return cx, cy, radius
-
-        edges = np.linspace(tmin, tmax, seg_count + 1) if seg_count > 1 else np.array([tmin, tmax])
-
-        def _build_segments(min_pts: int) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]], float]:
-            segments: List[Dict[str, Any]] = []
-            best_radius = 0.0
-            best_seg: Optional[Dict[str, Any]] = None
-            for i in range(len(edges) - 1):
-                t0 = float(edges[i])
-                t1 = float(edges[i + 1])
-                if t1 <= t0:
-                    continue
-                is_last = (i == len(edges) - 2)
-                mask = (t >= t0) & (t <= t1 if is_last else t < t1)
-                if np.sum(mask) < min_pts:
-                    continue
-                seg_t = t[mask]
-                seg_pts = centered[mask]
-                proj = seg_pts - np.outer(seg_t, axis)
-                xs = proj @ u
-                ys = proj @ v
-                fit = _fit_circle(xs, ys)
-                if fit is None:
-                    radial = np.linalg.norm(proj, axis=1)
-                    if len(radial) < 1:
-                        continue
-                    radius = float(np.percentile(radial, pct))
-                    cx = 0.0
-                    cy = 0.0
-                else:
-                    cx, cy, radius = fit
-                offset = u * cx + v * cy
-                center = mean + axis * (0.5 * (t0 + t1)) + offset
-                center_bottom = mean + axis * t0 + offset
-                center_top = mean + axis * t1 + offset
-                seg = {
-                    "t0": float(t0),
-                    "t1": float(t1),
-                    "center": center.tolist(),
-                    "center_bottom": center_bottom.tolist(),
-                    "center_top": center_top.tolist(),
-                    "radius": float(radius),
-                }
-                segments.append(seg)
-                if radius > best_radius:
-                    best_radius = float(radius)
-                    best_seg = seg
-            return segments, best_seg, best_radius
-
-        segments: List[Dict[str, Any]] = []
-        best_seg: Optional[Dict[str, Any]] = None
-
-        if full_height <= 1e-9 or seg_count <= 1:
-            proj = centered - np.outer(t, axis)
-            xs = proj @ u
-            ys = proj @ v
-            fit = _fit_circle(xs, ys)
-            if fit is None:
-                radial = np.linalg.norm(proj, axis=1)
-                radius = float(np.percentile(radial, pct))
-                cx = 0.0
-                cy = 0.0
-            else:
-                cx, cy, radius = fit
-            t0 = tmin
-            t1 = tmax
-            offset = u * cx + v * cy
-            center = mean + axis * (0.5 * (t0 + t1)) + offset
-            center_bottom = mean + axis * t0 + offset
-            center_top = mean + axis * t1 + offset
-            seg = {
-                "t0": float(t0),
-                "t1": float(t1),
+        segment_entries: List[Dict[str, Any]] = []
+        segment_radii: List[float] = []
+        path_pts: List[np.ndarray] = []
+        for i in range(len(edges) - 1):
+            t0 = float(edges[i])
+            t1 = float(edges[i + 1])
+            if t1 <= t0:
+                continue
+            is_last = i == len(edges) - 2
+            mask = (t >= t0) & (t <= t1 if is_last else t < t1)
+            if int(np.sum(mask)) < min_pts:
+                continue
+            seg_pts = pts_work[mask]
+            radius = self._compute_segment_radius(seg_pts, axis, float(percentile))
+            if radius is None:
+                continue
+            center = origin + axis * (0.5 * (t0 + t1))
+            center_bottom = origin + axis * t0
+            center_top = origin + axis * t1
+            path_pts.append(center)
+            segment_entries.append({
+                "t0": t0,
+                "t1": t1,
                 "center": center.tolist(),
                 "center_bottom": center_bottom.tolist(),
                 "center_top": center_top.tolist(),
                 "radius": float(radius),
-            }
-            segments.append(seg)
-            best_seg = seg
-        else:
-            segments, best_seg, _ = _build_segments(10)
-            if not segments or best_seg is None:
-                segments, best_seg, _ = _build_segments(3)
-            if not segments or best_seg is None:
-                segments, best_seg, _ = _build_segments(1)
+                "diameter": float(2.0 * radius),
+            })
+            segment_radii.append(float(radius))
 
-        if not segments or best_seg is None:
-            return None
+        if not segment_radii:
+            radius = self._compute_segment_radius(pts_work, axis, float(percentile))
+            if radius is None:
+                return None
+            center = origin + axis * (0.5 * (tmin + tmax))
+            center_bottom = origin + axis * tmin
+            center_top = origin + axis * tmax
+            segment_entries = [{
+                "t0": tmin,
+                "t1": tmax,
+                "center": center.tolist(),
+                "center_bottom": center_bottom.tolist(),
+                "center_top": center_top.tolist(),
+                "radius": float(radius),
+                "diameter": float(2.0 * radius),
+            }]
+            segment_radii = [float(radius)]
+            path_pts = [center_bottom, center_top]
 
-        segments = sorted(segments, key=lambda s: s["t0"])
-        path_pts = [np.asarray(seg["center_bottom"], dtype=np.float64) for seg in segments]
-        path_pts.append(np.asarray(segments[-1]["center_top"], dtype=np.float64))
-        stem_length = _polyline_length(np.asarray(path_pts, dtype=np.float64))
-
+        rep_radius = float(np.median(np.asarray(segment_radii, dtype=np.float64)))
+        cyl_center = origin + axis * (0.5 * (tmin + tmax))
+        cyl_bottom = origin + axis * tmin
+        cyl_top = origin + axis * tmax
         best_cyl = {
-            "center": best_seg["center"],
+            "center": cyl_center.tolist(),
+            "center_bottom": cyl_bottom.tolist(),
+            "center_top": cyl_top.tolist(),
             "axis": axis.tolist(),
-            "height": float(best_seg["t1"] - best_seg["t0"]),
-            "radius": float(best_seg["radius"]),
-            "diameter": float(best_seg["radius"]) * 2.0,
+            "height": float(full_height),
+            "radius": float(rep_radius),
+            "diameter": float(2.0 * rep_radius),
+            "point_count": int(len(pts_work)),
         }
+
+        path_arr = np.asarray(path_pts, dtype=np.float64)
+        if len(path_arr) < 2:
+            path_arr = np.asarray([cyl_bottom, cyl_top], dtype=np.float64)
 
         return {
             "axis": axis.tolist(),
-            "segments": segments,
+            "segments": segment_entries,
             "best": best_cyl,
-            "length_path": [p.tolist() for p in path_pts],
-            "length": float(stem_length if stem_length is not None else 0.0),
+            "length_path": [p.tolist() for p in path_arr],
+            "length": float(full_height),
+            "denoised_point_count": int(len(pts_work)),
         }
 
 
@@ -219,28 +287,25 @@ class StemMixin:
             return None
         return prof.get("best")
 
+
     def _compute_stem_length_from_growth(self, pts: np.ndarray) -> Optional[Dict[str, Any]]:
-        direction = getattr(self, "growth_direction", None)
-        if direction is None:
+        axis = self._normalize_axis(getattr(self, "growth_direction", None))
+        if axis is None or pts is None or len(pts) < 2:
             return None
-        axis = np.asarray(direction, dtype=np.float64)
-        norm = float(np.linalg.norm(axis))
-        if norm <= 1e-12:
+        pts_work = self._denoise_stem_points(pts, axis)
+        if pts_work is None or len(pts_work) < 2:
             return None
-        axis = axis / norm
-        t = pts @ axis
+        origin = pts_work.mean(axis=0)
+        t = (pts_work - origin) @ axis
         tmin = float(np.min(t))
         tmax = float(np.max(t))
         if tmax <= tmin:
             return None
-        mean = pts.mean(axis=0)
-        origin = mean - axis * float(np.dot(mean, axis))
         p1 = origin + axis * tmin
         p2 = origin + axis * tmax
-        length = float(tmax - tmin)
         return {
             "length_path": [p1.tolist(), p2.tolist()],
-            "length": length,
+            "length": float(tmax - tmin),
         }
 
 
@@ -255,8 +320,8 @@ class StemMixin:
         stem_segments = getattr(self.params, "stem_diameter_segments", 0)
         length_segments = getattr(self.params, "stem_length_segments", 0)
         count = 0
-        for inst_id, sem_label in sem_map.items():
-            if int(sem_label) != int(stem_label):
+        for inst_id, sem_label_cur in sem_map.items():
+            if int(sem_label_cur) != int(stem_label):
                 continue
             pts = self.get_instance_points(inst_id)
             ann = self._ensure_annotation_entry(inst_id)
@@ -287,8 +352,8 @@ class StemMixin:
         stem_pct = self._get_stem_diameter_percentile()
         stem_segments = getattr(self.params, "stem_diameter_segments", 0)
         count = 0
-        for inst_id, sem_label in sem_map.items():
-            if int(sem_label) != int(stem_label):
+        for inst_id, sem_label_cur in sem_map.items():
+            if int(sem_label_cur) != int(stem_label):
                 continue
             pts = self.get_instance_points(inst_id)
             prof = self._compute_stem_profile(pts, segments=stem_segments, percentile=stem_pct)
@@ -311,8 +376,8 @@ class StemMixin:
         length_pct = self._get_stem_length_percentile()
         length_segments = getattr(self.params, "stem_length_segments", 0)
         count = 0
-        for inst_id, sem_label in sem_map.items():
-            if int(sem_label) != int(stem_label):
+        for inst_id, sem_label_cur in sem_map.items():
+            if int(sem_label_cur) != int(stem_label):
                 continue
             pts = self.get_instance_points(inst_id)
             prof = self._compute_stem_profile(pts, segments=length_segments, percentile=length_pct)
