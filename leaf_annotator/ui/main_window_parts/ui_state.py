@@ -436,9 +436,12 @@ class UiStateMixin:
         if hasattr(self.session, "plant_measurements"):
             meas = self.session.plant_measurements or {}
             height = meas.get("height")
+            absolute_height = meas.get("absolute_height")
             crown = meas.get("crown_width")
             if height is not None:
                 rows.append((self.tr("整株"), "-", self.tr("株高"), f"{float(height):.3f}"))
+            if absolute_height is not None:
+                rows.append((self.tr("整株"), "-", self.tr("绝对株高"), f"{float(absolute_height):.3f}"))
             if crown is not None:
                 rows.append((self.tr("整株"), "-", self.tr("冠幅"), f"{float(crown):.3f}"))
         for inst_id, ann in self.session.annotations.items():

@@ -49,9 +49,12 @@ class ActionsMixin:
         rows = []
         plant_meas = data.get("plant_measurements") or {}
         height = plant_meas.get("height")
+        absolute_height = plant_meas.get("absolute_height")
         crown = plant_meas.get("crown_width")
         if height is not None:
             rows.append([file_name, self.tr("整株"), "-", self.tr("株高"), f"{float(height):.3f}"])
+        if absolute_height is not None:
+            rows.append([file_name, self.tr("整株"), "-", self.tr("绝对株高"), f"{float(absolute_height):.3f}"])
         if crown is not None:
             rows.append([file_name, self.tr("整株"), "-", self.tr("冠幅"), f"{float(crown):.3f}"])
 
@@ -86,21 +89,204 @@ class ActionsMixin:
         return rows
 
 
-    def on_batch_compute_quick(self):
-        cloud_dir = QFileDialog.getExistingDirectory(
-            self,
-            self.tr("选择点云目录"),
-            self._settings.value("last_dir", "", type=str),
-        )
-        if not cloud_dir:
-            return
-        export_dir = QFileDialog.getExistingDirectory(
-            self,
-            self.tr("选择批量JSON导出目录"),
-            self._settings.value("export_dir", cloud_dir, type=str) or cloud_dir,
-        )
+    def _compute_leaf_inclination_batch(self, session_obj):
+        leaf_label = session_obj.semantic_map.get("leaf")
+        if leaf_label is None:
+            return 0
+        sem_map = session_obj._get_instance_sem_map()
+        count = 0
+        for inst_id, sem_label in sem_map.items():
+            if int(sem_label) != int(leaf_label):
+                continue
+            try:
+                session_obj.select_instance(int(inst_id))
+                angle = session_obj.compute_leaf_inclination_instance()
+                if angle is not None:
+                    count += 1
+            except Exception:
+                continue
+        return count
+
+
+    def _compute_leaf_stem_angle_batch(self, session_obj):
+        leaf_label = session_obj.semantic_map.get("leaf")
+        if leaf_label is None:
+            return 0
+        sem_map = session_obj._get_instance_sem_map()
+        count = 0
+        for inst_id, sem_label in sem_map.items():
+            if int(sem_label) != int(leaf_label):
+                continue
+            try:
+                session_obj.select_instance(int(inst_id))
+                angle = session_obj.compute_leaf_stem_angle_instance()
+                if angle is not None:
+                    count += 1
+            except Exception:
+                continue
+        return count
+
+
+    def _open_batch_compute_dialog(self):
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle(self.tr("批量快速计算设置"))
+        layout = QtWidgets.QVBoxLayout(dlg)
+
+        form = QtWidgets.QFormLayout()
+        cloud_edit = QtWidgets.QLineEdit(self._settings.value("last_dir", "", type=str))
+        export_edit = QtWidgets.QLineEdit(self._settings.value("export_dir", "", type=str))
+
+        cloud_row = QtWidgets.QHBoxLayout()
+        cloud_row.addWidget(cloud_edit)
+        btn_cloud = QtWidgets.QPushButton(self.tr("浏览"))
+        cloud_row.addWidget(btn_cloud)
+
+        export_row = QtWidgets.QHBoxLayout()
+        export_row.addWidget(export_edit)
+        btn_export = QtWidgets.QPushButton(self.tr("浏览"))
+        export_row.addWidget(btn_export)
+
+        form.addRow(self.tr("点云目录"), cloud_row)
+        form.addRow(self.tr("JSON输出目录"), export_row)
+        layout.addLayout(form)
+
+        tips = QtWidgets.QLabel(self.tr("确认目录后，点击“开始计算”执行批量计算。"))
+        tips.setWordWrap(True)
+        layout.addWidget(tips)
+
+        def choose_cloud():
+            folder = QFileDialog.getExistingDirectory(
+                self,
+                self.tr("选择点云目录"),
+                cloud_edit.text() or self._settings.value("last_dir", "", type=str),
+            )
+            if folder:
+                cloud_edit.setText(folder)
+
+        def choose_export():
+            folder = QFileDialog.getExistingDirectory(
+                self,
+                self.tr("选择批量JSON导出目录"),
+                export_edit.text() or cloud_edit.text() or self._settings.value("export_dir", "", type=str),
+            )
+            if folder:
+                export_edit.setText(folder)
+
+        btn_cloud.clicked.connect(choose_cloud)
+        btn_export.clicked.connect(choose_export)
+
+        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        btns.button(QtWidgets.QDialogButtonBox.Ok).setText(self.tr("开始计算"))
+        btns.button(QtWidgets.QDialogButtonBox.Cancel).setText(self.tr("取消"))
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        layout.addWidget(btns)
+
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return None
+
+        cloud_dir = (cloud_edit.text() or "").strip()
+        export_dir = (export_edit.text() or "").strip()
+        if not cloud_dir or not os.path.isdir(cloud_dir):
+            QMessageBox.information(self, self.tr("提示"), self.tr("请先选择有效的点云目录。"))
+            return None
         if not export_dir:
+            export_dir = cloud_dir
+        if not os.path.isdir(export_dir):
+            QMessageBox.information(self, self.tr("提示"), self.tr("请先选择有效的JSON输出目录。"))
+            return None
+
+        self._settings.setValue("last_dir", cloud_dir)
+        self._settings.setValue("export_dir", export_dir)
+        return cloud_dir, export_dir
+
+
+    def _open_batch_export_dialog(self):
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle(self.tr("批量导出设置"))
+        layout = QtWidgets.QVBoxLayout(dlg)
+
+        form = QtWidgets.QFormLayout()
+        json_dir_edit = QtWidgets.QLineEdit(
+            self._settings.value("export_dir", self._settings.value("last_dir", "", type=str), type=str)
+        )
+        out_csv_edit = QtWidgets.QLineEdit()
+
+        if json_dir_edit.text().strip():
+            out_csv_edit.setText(os.path.join(json_dir_edit.text().strip(), "batch_phenotypes.csv"))
+
+        json_row = QtWidgets.QHBoxLayout()
+        json_row.addWidget(json_dir_edit)
+        btn_json = QtWidgets.QPushButton(self.tr("浏览"))
+        json_row.addWidget(btn_json)
+
+        csv_row = QtWidgets.QHBoxLayout()
+        csv_row.addWidget(out_csv_edit)
+        btn_csv = QtWidgets.QPushButton(self.tr("浏览"))
+        csv_row.addWidget(btn_csv)
+
+        form.addRow(self.tr("JSON目录"), json_row)
+        form.addRow(self.tr("CSV输出文件"), csv_row)
+        layout.addLayout(form)
+
+        tips = QtWidgets.QLabel(self.tr("确认参数后，点击“开始导出”执行批量导出。"))
+        tips.setWordWrap(True)
+        layout.addWidget(tips)
+
+        def choose_json():
+            folder = QFileDialog.getExistingDirectory(
+                self,
+                self.tr("选择JSON目录"),
+                json_dir_edit.text() or self._settings.value("export_dir", "", type=str),
+            )
+            if folder:
+                json_dir_edit.setText(folder)
+                if not out_csv_edit.text().strip():
+                    out_csv_edit.setText(os.path.join(folder, "batch_phenotypes.csv"))
+
+        def choose_csv():
+            base = out_csv_edit.text().strip()
+            if not base:
+                base = os.path.join(json_dir_edit.text().strip() or ".", "batch_phenotypes.csv")
+            path, _ = QFileDialog.getSaveFileName(
+                self,
+                self.tr("选择CSV输出文件"),
+                base,
+                "CSV (*.csv);;All (*.*)",
+            )
+            if path:
+                out_csv_edit.setText(path)
+
+        btn_json.clicked.connect(choose_json)
+        btn_csv.clicked.connect(choose_csv)
+
+        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        btns.button(QtWidgets.QDialogButtonBox.Ok).setText(self.tr("开始导出"))
+        btns.button(QtWidgets.QDialogButtonBox.Cancel).setText(self.tr("取消"))
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        layout.addWidget(btns)
+
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return None
+
+        json_dir = (json_dir_edit.text() or "").strip()
+        out_path = (out_csv_edit.text() or "").strip()
+        if not json_dir or not os.path.isdir(json_dir):
+            QMessageBox.information(self, self.tr("提示"), self.tr("请先选择有效的JSON目录。"))
+            return None
+        if not out_path:
+            QMessageBox.information(self, self.tr("提示"), self.tr("请先选择有效的CSV输出文件路径。"))
+            return None
+        self._settings.setValue("export_dir", json_dir)
+        return json_dir, out_path
+
+
+    def on_batch_compute_quick(self):
+        selected = self._open_batch_compute_dialog()
+        if not selected:
             return
+        cloud_dir, export_dir = selected
         cloud_files = self._iter_point_cloud_files(cloud_dir)
         if not cloud_files:
             QMessageBox.information(self, self.tr("提示"), self.tr("所选目录中没有可处理的点云文件。"))
@@ -115,7 +301,9 @@ class ActionsMixin:
                 "2. 读取或创建同名 JSON；\n"
                 "3. 自动计算生长方向；\n"
                 "4. 计算茎粗、茎长、株高、冠幅；\n"
-                "5. 保存回对应 JSON。"
+                "5. 计算叶倾角；\n"
+                "6. 计算叶夹角；\n"
+                "7. 保存回对应 JSON。"
             ),
         )
 
@@ -132,12 +320,12 @@ class ActionsMixin:
                 self._update_status(self.tr("批量计算：准备处理 {name} ({index}/{total})", name=os.path.basename(cloud_path), index=idx, total=len(cloud_files)))
                 batch_session = session_cls(params=copy.deepcopy(self.session.params), schema=copy.deepcopy(self.session.schema))
                 if dlg is not None:
-                    dlg.setLabelText(self.tr("步骤 1/5：读取点云 {name}", name=os.path.basename(cloud_path)))
+                    dlg.setLabelText(self.tr("步骤 1/7：读取点云 {name}", name=os.path.basename(cloud_path)))
                     QtWidgets.QApplication.processEvents()
                 batch_session.load(cloud_path)
                 json_path = self._resolve_batch_json_path(cloud_path, export_dir)
                 if dlg is not None:
-                    dlg.setLabelText(self.tr("步骤 2/5：读取或创建 JSON {name}", name=os.path.basename(json_path)))
+                    dlg.setLabelText(self.tr("步骤 2/7：读取或创建 JSON {name}", name=os.path.basename(json_path)))
                     QtWidgets.QApplication.processEvents()
                 if os.path.isfile(json_path):
                     try:
@@ -150,17 +338,25 @@ class ActionsMixin:
                     continue
                 try:
                     if dlg is not None:
-                        dlg.setLabelText(self.tr("步骤 3/5：计算生长方向 {name}", name=os.path.basename(cloud_path)))
+                        dlg.setLabelText(self.tr("步骤 3/7：计算生长方向 {name}", name=os.path.basename(cloud_path)))
                         QtWidgets.QApplication.processEvents()
                     batch_session.compute_growth_direction_from_stem()
                     if dlg is not None:
-                        dlg.setLabelText(self.tr("步骤 4/5：计算茎粗、茎长、株高、冠幅 {name}", name=os.path.basename(cloud_path)))
+                        dlg.setLabelText(self.tr("步骤 4/7：计算茎粗、茎长、株高、冠幅 {name}", name=os.path.basename(cloud_path)))
                         QtWidgets.QApplication.processEvents()
                     batch_session.compute_stem_diameter_structures()
                     batch_session.compute_stem_length_structures()
                     batch_session.compute_plant_height_crown()
                     if dlg is not None:
-                        dlg.setLabelText(self.tr("步骤 5/5：保存 JSON {name}", name=os.path.basename(json_path)))
+                        dlg.setLabelText(self.tr("步骤 5/7：计算叶倾角 {name}", name=os.path.basename(cloud_path)))
+                        QtWidgets.QApplication.processEvents()
+                    self._compute_leaf_inclination_batch(batch_session)
+                    if dlg is not None:
+                        dlg.setLabelText(self.tr("步骤 6/7：计算叶夹角 {name}", name=os.path.basename(cloud_path)))
+                        QtWidgets.QApplication.processEvents()
+                    self._compute_leaf_stem_angle_batch(batch_session)
+                    if dlg is not None:
+                        dlg.setLabelText(self.tr("步骤 7/7：保存 JSON {name}", name=os.path.basename(json_path)))
                         QtWidgets.QApplication.processEvents()
                     batch_session.export_all_json(json_path)
                     processed += 1
@@ -181,13 +377,10 @@ class ActionsMixin:
 
 
     def on_batch_export_phenotype_csv(self):
-        json_dir = QFileDialog.getExistingDirectory(
-            self,
-            self.tr("选择JSON目录"),
-            self._settings.value("export_dir", self._settings.value("last_dir", "", type=str), type=str),
-        )
-        if not json_dir:
+        selected = self._open_batch_export_dialog()
+        if not selected:
             return
+        json_dir, out_path = selected
         json_files = [
             os.path.join(json_dir, name)
             for name in sorted(os.listdir(json_dir))
@@ -207,16 +400,6 @@ class ActionsMixin:
                 "3. 汇总为一个 CSV 文件。"
             ),
         )
-
-        default_csv = os.path.join(json_dir, "batch_phenotypes.csv")
-        out_path, _ = QFileDialog.getSaveFileName(
-            self,
-            self.tr("批量导出表型CSV"),
-            default_csv,
-            "CSV (*.csv);;All (*.*)"
-        )
-        if not out_path:
-            return
 
         rows = []
         skipped = []
@@ -781,25 +964,29 @@ class ActionsMixin:
 
     def on_stem_diameter_params_dialog(self):
         dlg = QtWidgets.QDialog(self)
-        dlg.setWindowTitle(self.tr("茎粗参数"))
+        dlg.setWindowTitle(self.tr("茎粗去噪参数"))
         layout = QtWidgets.QVBoxLayout(dlg)
 
         form = QtWidgets.QFormLayout()
-        spin_segments = QtWidgets.QSpinBox()
-        spin_segments.setRange(1, 500)
-        seg_val = int(getattr(self.session.params, "stem_diameter_segments", 0))
-        if seg_val <= 0:
-            seg_val = 20
-        spin_segments.setValue(seg_val)
+        spin_knn_k = QtWidgets.QSpinBox()
+        spin_knn_k.setRange(2, 64)
+        spin_knn_k.setValue(int(getattr(self.session.params, "stem_denoise_knn_k", 8)))
 
-        spin_pct = QtWidgets.QDoubleSpinBox()
-        spin_pct.setRange(50.0, 99.9)
-        spin_pct.setDecimals(1)
-        spin_pct.setSingleStep(0.5)
-        spin_pct.setValue(float(getattr(self.session.params, "stem_diameter_percentile", 95.0)))
+        spin_knn_sigma = QtWidgets.QDoubleSpinBox()
+        spin_knn_sigma.setRange(0.5, 10.0)
+        spin_knn_sigma.setDecimals(2)
+        spin_knn_sigma.setSingleStep(0.1)
+        spin_knn_sigma.setValue(float(getattr(self.session.params, "stem_denoise_knn_sigma", 2.5)))
 
-        form.addRow(self.tr("分段数"), spin_segments)
-        form.addRow(self.tr("半径百分位(%)"), spin_pct)
+        spin_radial_sigma = QtWidgets.QDoubleSpinBox()
+        spin_radial_sigma.setRange(0.5, 10.0)
+        spin_radial_sigma.setDecimals(2)
+        spin_radial_sigma.setSingleStep(0.1)
+        spin_radial_sigma.setValue(float(getattr(self.session.params, "stem_denoise_radial_sigma", 2.5)))
+
+        form.addRow(self.tr("邻域点数 k"), spin_knn_k)
+        form.addRow(self.tr("邻域距离阈值系数"), spin_knn_sigma)
+        form.addRow(self.tr("径向阈值系数"), spin_radial_sigma)
         layout.addLayout(form)
 
         btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
@@ -810,8 +997,9 @@ class ActionsMixin:
         if dlg.exec_() != QtWidgets.QDialog.Accepted:
             return False
 
-        self.session.params.stem_diameter_segments = int(spin_segments.value())
-        self.session.params.stem_diameter_percentile = float(spin_pct.value())
+        self.session.params.stem_denoise_knn_k = int(spin_knn_k.value())
+        self.session.params.stem_denoise_knn_sigma = float(spin_knn_sigma.value())
+        self.session.params.stem_denoise_radial_sigma = float(spin_radial_sigma.value())
         return True
 
 

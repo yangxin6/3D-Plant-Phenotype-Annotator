@@ -174,10 +174,12 @@ class PlantMixin:
         zmin = float(np.min(local[:, 2]))
         zmax = float(np.max(local[:, 2]))
         height = max(0.0, zmax - zmin)
+        absolute_height = float(np.max(pts @ z_axis))
         crown = float(np.hypot(xmax - xmin, ymax - ymin))
 
         self.plant_measurements = {
             "height": float(height),
+            "absolute_height": float(absolute_height),
             "crown_width": float(crown),
             "extents": {
                 "x_min": float(xmin),
@@ -239,6 +241,7 @@ class PlantMixin:
         if not isinstance(data, dict):
             return
         height = data.get("height")
+        absolute_height = data.get("absolute_height")
         crown = data.get("crown_width")
         extents = data.get("extents")
         origin = data.get("origin")
@@ -247,6 +250,11 @@ class PlantMixin:
         if height is not None:
             try:
                 out["height"] = float(height)
+            except Exception:
+                pass
+        if absolute_height is not None:
+            try:
+                out["absolute_height"] = float(absolute_height)
             except Exception:
                 pass
         if crown is not None:

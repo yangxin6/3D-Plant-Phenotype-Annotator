@@ -132,11 +132,18 @@ class StemMixin:
 
     def _denoise_stem_points(self, pts: np.ndarray, axis: np.ndarray) -> np.ndarray:
         pts_work = np.asarray(pts, dtype=np.float64)
-        pts_work = self._remove_knn_outliers(pts_work)
+        denoise_k = int(getattr(self.params, "stem_denoise_knn_k", 8))
+        denoise_knn_sigma = float(getattr(self.params, "stem_denoise_knn_sigma", 2.5))
+        denoise_radial_sigma = float(getattr(self.params, "stem_denoise_radial_sigma", 2.5))
+        denoise_k = max(2, denoise_k)
+        denoise_knn_sigma = max(0.5, denoise_knn_sigma)
+        denoise_radial_sigma = max(0.5, denoise_radial_sigma)
+
+        pts_work = self._remove_knn_outliers(pts_work, k=denoise_k, sigma_scale=denoise_knn_sigma)
         if len(pts_work) < 10:
             return np.asarray(pts, dtype=np.float64)
         origin = pts_work.mean(axis=0)
-        pts_work = self._remove_radial_outliers(pts_work, axis, origin)
+        pts_work = self._remove_radial_outliers(pts_work, axis, origin, sigma_scale=denoise_radial_sigma)
         if len(pts_work) < 10:
             return np.asarray(pts, dtype=np.float64)
         return pts_work

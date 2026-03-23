@@ -24,5 +24,8 @@ class AnnotationParams:
     stem_step: float = 0.01  # 旧字段，兼容 step
     stem_diameter_percentile: float = 95.0
     stem_length_percentile: float = 95.0
+    stem_denoise_knn_k: int = 8
+    stem_denoise_knn_sigma: float = 2.5
+    stem_denoise_radial_sigma: float = 2.5
 
 
