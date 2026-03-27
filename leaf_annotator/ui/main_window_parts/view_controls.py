@@ -97,6 +97,27 @@ class ViewControlsMixin:
         self._show_stem_only_scene()
         self.plotter.render()
 
+    def on_toggle_show_leaf_vein(self, checked: bool):
+        if self.session.cloud is None:
+            return
+        self._update_leaf_stem_overview_display()
+        if not checked and (not hasattr(self, "act_show_leaf_angles") or not self.act_show_leaf_angles.isChecked()):
+            self._update_leaf_angle_visuals()
+        self.plotter.render()
+
+    def on_toggle_show_leaf_angles(self, checked: bool):
+        if self.session.cloud is None:
+            return
+        if checked and hasattr(self, "act_show_leaf_vein") and not self.act_show_leaf_vein.isChecked():
+            self.act_show_leaf_vein.blockSignals(True)
+            self.act_show_leaf_vein.setChecked(True)
+            self.act_show_leaf_vein.blockSignals(False)
+        self._clear_leaf_angle_actors()
+        self._update_leaf_stem_overview_display()
+        if not checked:
+            self._update_leaf_angle_visuals()
+        self.plotter.render()
+
 
     def on_toggle_growth_direction(self, checked: bool):
         if self.session.cloud is None:

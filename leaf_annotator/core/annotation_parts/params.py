@@ -6,26 +6,28 @@ from dataclasses import dataclass
 class AnnotationParams:
     voxel: float = 0.003
     k: int = 25
-    smooth_win: int = 9  # 仍保留但叶长不再平滑
+    smooth_win: int = 9  # kept for compatibility
     label_radius: float = 0.01
     graph_radius: float = 0.02
 
-    # 旧“最大叶宽”估计参数（用于推荐）
+    # Width recommendation parameters
     step: float = 0.01
     slab_half: float = 0.01
     radius: float = 0.01
     min_slice_pts: int = 60
-    leaf_inclination_ratio: float = 0.5  # 叶倾角计算位置（叶长比例）
-    leaf_inclination_radius: float = 0.01  # 叶倾角局部拟合半径（<=0 使用整叶）
-    leaf_stem_ratio: float = 0.1  # 叶夹角计算起始段长度比例
+
+    # Leaf angle parameters (default: 1/5)
+    leaf_inclination_ratio: float = 0.2
+    leaf_inclination_radius: float = 0.01
+    leaf_stem_ratio: float = 0.2
+
     stem_diameter_segments: int = 0
     stem_length_segments: int = 0
-    stem_segments: int = 0  # 旧字段，兼容单一分段数
-    stem_step: float = 0.01  # 旧字段，兼容 step
+    stem_segments: int = 0  # legacy field
+    stem_step: float = 0.01  # legacy field
     stem_diameter_percentile: float = 95.0
     stem_length_percentile: float = 95.0
     stem_denoise_knn_k: int = 8
     stem_denoise_knn_sigma: float = 2.5
     stem_denoise_radial_sigma: float = 2.5
-
 

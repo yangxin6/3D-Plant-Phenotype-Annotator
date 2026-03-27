@@ -11,6 +11,110 @@ from .utils import make_polyline_mesh, stable_color_from_id, colors_from_labels
 
 
 class SceneMixin:
+    def _clear_leaf_overview_actors(self):
+        names = getattr(self, "_leaf_overview_actor_names", [])
+        for name in names:
+            self._remove_actor(name)
+        self._leaf_overview_actor_names = []
+
+    def _track_leaf_overview_actor(self, name: str):
+        if not hasattr(self, "_leaf_overview_actor_names"):
+            self._leaf_overview_actor_names = []
+        if name not in self._leaf_overview_actor_names:
+            self._leaf_overview_actor_names.append(name)
+
+    def _update_leaf_stem_overview_display(self):
+        self._clear_leaf_overview_actors()
+        if self.session.cloud is None:
+            return
+        show_vein = bool(hasattr(self, "act_show_leaf_vein") and self.act_show_leaf_vein.isChecked())
+        show_angles = bool(hasattr(self, "act_show_leaf_angles") and self.act_show_leaf_angles.isChecked())
+        if not show_vein and not show_angles:
+            return
+
+        sem_map = self._get_instance_sem_map()
+        leaf_label = self.session.semantic_map.get("leaf")
+        if show_angles:
+            show_vein = True
+
+        def _norm_vec(vec):
+            if vec is None:
+                return None
+            v = np.asarray(vec, dtype=np.float64)
+            if v.shape != (3,):
+                return None
+            n = float(np.linalg.norm(v))
+            if n <= 1e-12:
+                return None
+            return v / n
+
+        for inst_id, ann in self.session.annotations.items():
+            if leaf_label is not None and sem_map.get(int(inst_id)) != int(leaf_label):
+                continue
+
+            cl = ann.get("centerline")
+            if show_vein and cl is not None and len(cl) >= 2:
+                cl_pts = np.asarray(cl, dtype=np.float64)
+                name = f"overview_leaf_vein_{int(inst_id)}"
+                self._add_polyline_actor(name, cl_pts, "red", 3)
+                self._track_leaf_overview_actor(name)
+                seg = np.linalg.norm(cl_pts[1:] - cl_pts[:-1], axis=1)
+                scale = max(0.02, 0.2 * float(np.sum(seg)))
+            else:
+                scale = 0.05
+
+            inc = ann.get("leaf_inclination_viz") if show_angles else None
+            if inc is not None:
+                origin = np.asarray(inc.get("origin"), dtype=np.float64) if inc.get("origin") is not None else None
+                normal = _norm_vec(inc.get("normal"))
+                z_axis = _norm_vec(inc.get("z_axis") or [0.0, 0.0, 1.0])
+                if origin is not None and origin.shape == (3,) and normal is not None and z_axis is not None:
+                    if float(np.dot(normal, z_axis)) < 0:
+                        normal = -normal
+                    name_n = f"overview_inc_n_{int(inst_id)}"
+                    name_z = f"overview_inc_z_{int(inst_id)}"
+                    self._add_polyline_actor(name_n, np.asarray([origin, origin + normal * scale]), "yellow", 2)
+                    self._add_polyline_actor(name_z, np.asarray([origin, origin + z_axis * scale]), "cyan", 2)
+                    self._track_leaf_overview_actor(name_n)
+                    self._track_leaf_overview_actor(name_z)
+                    dot = float(np.clip(np.dot(normal, z_axis), -1.0, 1.0))
+                    angle = float(np.arccos(dot))
+                    v = z_axis - dot * normal
+                    v_norm = float(np.linalg.norm(v))
+                    if angle > 1e-3 and v_norm > 1e-6:
+                        v = v / v_norm
+                        arc_pts = []
+                        for t in np.linspace(0.0, angle, 21):
+                            arc_pts.append(origin + (scale * 0.7) * (np.cos(t) * normal + np.sin(t) * v))
+                        name_arc = f"overview_inc_arc_{int(inst_id)}"
+                        self._add_polyline_actor(name_arc, np.asarray(arc_pts), "orange", 2)
+                        self._track_leaf_overview_actor(name_arc)
+
+            leaf_stem = ann.get("leaf_stem_angle_viz") if show_angles else None
+            if leaf_stem is not None:
+                origin = np.asarray(leaf_stem.get("origin"), dtype=np.float64) if leaf_stem.get("origin") is not None else None
+                leaf_dir = _norm_vec(leaf_stem.get("leaf_dir"))
+                stem_dir = _norm_vec(leaf_stem.get("stem_dir"))
+                if origin is not None and origin.shape == (3,) and leaf_dir is not None and stem_dir is not None:
+                    name_l = f"overview_ls_leaf_{int(inst_id)}"
+                    name_s = f"overview_ls_stem_{int(inst_id)}"
+                    self._add_polyline_actor(name_l, np.asarray([origin, origin + leaf_dir * scale]), "green", 2)
+                    self._add_polyline_actor(name_s, np.asarray([origin, origin + stem_dir * scale]), "orange", 2)
+                    self._track_leaf_overview_actor(name_l)
+                    self._track_leaf_overview_actor(name_s)
+                    dot = float(np.clip(np.dot(stem_dir, leaf_dir), -1.0, 1.0))
+                    angle = float(np.arccos(dot))
+                    v = leaf_dir - dot * stem_dir
+                    v_norm = float(np.linalg.norm(v))
+                    if angle > 1e-3 and v_norm > 1e-6:
+                        v = v / v_norm
+                        arc_pts = []
+                        for t in np.linspace(0.0, angle, 21):
+                            arc_pts.append(origin + (scale * 0.7) * (np.cos(t) * stem_dir + np.sin(t) * v))
+                        name_arc = f"overview_ls_arc_{int(inst_id)}"
+                        self._add_polyline_actor(name_arc, np.asarray(arc_pts), "orange", 2)
+                        self._track_leaf_overview_actor(name_arc)
+
     def _remove_actor(self, name: str):
         try:
             self.plotter.remove_actor(name)
@@ -154,6 +258,7 @@ class SceneMixin:
             self.A_PLANT_CROWN, self.A_PLANT_CROWN_LABEL,
         ]:
             self._remove_actor(nm)
+        self._clear_leaf_overview_actors()
 
         self._update_measure_display()
         self.plotter.render()
@@ -197,6 +302,7 @@ class SceneMixin:
             self.A_PLANT_CROWN, self.A_PLANT_CROWN_LABEL,
         ]:
             self._remove_actor(nm)
+        self._clear_leaf_overview_actors()
 
         self._update_stem_cylinders()
         self._update_stem_length_paths()
@@ -628,6 +734,7 @@ class SceneMixin:
             self._remove_actor(self.A_LINE_CENTER_CACHED)
             self._remove_actor(self.A_LINE_WIDTH_CACHED)
         self._update_leaf_angle_visuals()
+        self._update_leaf_stem_overview_display()
 
     def _clear_leaf_angle_actors(self):
         for nm in [
@@ -655,6 +762,9 @@ class SceneMixin:
         return max(scale, 0.02)
 
     def _update_leaf_angle_visuals(self):
+        if hasattr(self, "act_show_leaf_angles") and self.act_show_leaf_angles.isChecked():
+            self._clear_leaf_angle_actors()
+            return
         if (not self.annotating) or self.annotate_semantic != "leaf":
             self._clear_leaf_angle_actors()
             return
@@ -787,6 +897,7 @@ class SceneMixin:
             self._show_stem_only_scene()
             self._update_growth_direction_display()
             self._update_plant_measurement_display()
+            self._update_leaf_stem_overview_display()
             self.plotter.render()
             return
         if not self.annotating:
@@ -806,6 +917,7 @@ class SceneMixin:
         self._update_view_legend()
         self._update_growth_direction_display()
         self._update_plant_measurement_display()
+        self._update_leaf_stem_overview_display()
         self.plotter.render()
 
 

@@ -323,7 +323,10 @@ class UiStateMixin:
         self.combo_stem_filter.setEnabled(has_cloud and not self.annotating)
         self.combo_flower_filter.setEnabled(has_cloud and not self.annotating)
         self.combo_fruit_filter.setEnabled(has_cloud and not self.annotating)
-        for a in [self.act_view_rgb, self.act_view_sem, self.act_view_inst, self.act_view_label]:
+        for a in [
+            self.act_view_rgb, self.act_view_sem, self.act_view_inst, self.act_view_label,
+            self.act_show_leaf_vein, self.act_show_leaf_angles
+        ]:
             a.setEnabled(has_cloud)
 
         self.act_save_labels.setEnabled(can_export)

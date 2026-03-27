@@ -235,7 +235,7 @@ class AnnotationMixin:
         spin_ratio.setRange(0.0, 1.0)
         spin_ratio.setDecimals(3)
         spin_ratio.setSingleStep(0.05)
-        spin_ratio.setValue(float(getattr(self.session.params, "leaf_inclination_ratio", 0.5)))
+        spin_ratio.setValue(float(getattr(self.session.params, "leaf_inclination_ratio", 0.2)))
 
         spin_radius = QtWidgets.QDoubleSpinBox()
         spin_radius.setRange(0.0, 10.0)
@@ -278,7 +278,7 @@ class AnnotationMixin:
         spin_ratio.setRange(0.0, 1.0)
         spin_ratio.setDecimals(3)
         spin_ratio.setSingleStep(0.05)
-        spin_ratio.setValue(float(getattr(self.session.params, "leaf_stem_ratio", 0.1)))
+        spin_ratio.setValue(float(getattr(self.session.params, "leaf_stem_ratio", 0.2)))
 
         form.addRow(self.tr("起始比例(0-1)："), spin_ratio)
         layout.addLayout(form)
