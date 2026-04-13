@@ -15,6 +15,7 @@ class AnnotationParams:
     slab_half: float = 0.01
     radius: float = 0.01
     min_slice_pts: int = 60
+    width_perp_lambda: float = 0.2
 
     # Leaf angle parameters (default: 1/5)
     leaf_inclination_ratio: float = 0.2
@@ -30,4 +31,3 @@ class AnnotationParams:
     stem_denoise_knn_k: int = 8
     stem_denoise_knn_sigma: float = 2.5
     stem_denoise_radial_sigma: float = 2.5
-

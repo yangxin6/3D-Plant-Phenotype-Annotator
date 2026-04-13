@@ -14,6 +14,9 @@ class WidthItem:
     pL: np.ndarray
     pR: np.ndarray
     slice_n: int
+    tangent: np.ndarray
+    perp_abs_dot: float
+    score: float
 
 
 @dataclass
@@ -31,6 +34,7 @@ class WidthEstimator:
         min_slice_pts: int = 60,
         qlo: float = 0.05,
         qhi: float = 0.95,
+        perp_lambda: float = 0.2,
     ):
         self.step = step
         self.slab_half = slab_half
@@ -38,6 +42,7 @@ class WidthEstimator:
         self.min_slice_pts = min_slice_pts
         self.qlo = qlo
         self.qhi = qhi
+        self.perp_lambda = perp_lambda
 
     @staticmethod
     def _plane_basis_from_tangent(t: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -131,6 +136,15 @@ class WidthEstimator:
             w = float(D[i, j])
             pL = cand[int(i)]
             pR = cand[int(j)]
+            width_vec = np.asarray(pR - pL, dtype=np.float64)
+            width_norm = float(np.linalg.norm(width_vec))
+            if width_norm <= 1e-12:
+                perp_abs_dot = 1.0
+            else:
+                width_dir = width_vec / width_norm
+                tangent = ab / seg_len
+                perp_abs_dot = float(abs(np.dot(width_dir, tangent)))
+            score = float(w * (1.0 - float(self.perp_lambda) * perp_abs_dot))
 
             item = WidthItem(
                 s_index=int(s_idx),
@@ -139,9 +153,12 @@ class WidthEstimator:
                 pL=pL.copy(),
                 pR=pR.copy(),
                 slice_n=int(len(cand)),
+                tangent=(ab / seg_len).copy(),
+                perp_abs_dot=float(perp_abs_dot),
+                score=score,
             )
             profile.append(item)
-            if max_item is None or item.width > max_item.width:
+            if max_item is None or item.score > max_item.score:
                 max_item = item
 
         return WidthResult(profile=profile, max_item=max_item)

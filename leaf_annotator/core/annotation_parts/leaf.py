@@ -182,10 +182,12 @@ class LeafMixin:
             step=self.params.step,
             slab_half=self.params.slab_half,
             radius=self.params.radius,
-            min_slice_pts=self.params.min_slice_pts
+            min_slice_pts=self.params.min_slice_pts,
+            perp_lambda=float(getattr(self.params, "width_perp_lambda", 0.2)),
         )
         wr = we.compute(self.leaf_pts, length_poly)
         if wr is None or wr.max_item is None:
+            self.width_recommend_hint = None
             self._width_recommended_once = True
             return False
 
@@ -198,6 +200,19 @@ class LeafMixin:
 
         self.width_w1_idx = int(w1)
         self.width_w2_idx = int(w2)
+        t = np.asarray(getattr(wr.max_item, "tangent", [0.0, 0.0, 0.0]), dtype=np.float64)
+        tn = float(np.linalg.norm(t))
+        if tn > 1e-12:
+            t = t / tn
+        else:
+            t = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        self.width_recommend_hint = {
+            "origin": np.asarray(wr.max_item.p, dtype=np.float64).tolist(),
+            "tangent": t.tolist(),
+            "step_index": int(wr.max_item.s_index),
+            "recommended_w1_idx": int(w1),
+            "recommended_w2_idx": int(w2),
+        }
 
         self._width_recommended_once = True
         return True
@@ -205,6 +220,103 @@ class LeafMixin:
 
     def recommend_width_endpoints_auto(self) -> bool:
         return self.recommend_width_endpoints(overwrite=False)
+
+    @staticmethod
+    def _unit_vector(vec: np.ndarray) -> Optional[np.ndarray]:
+        v = np.asarray(vec, dtype=np.float64)
+        n = float(np.linalg.norm(v))
+        if n <= 1e-12:
+            return None
+        return v / n
+
+    def _build_width_constraint_mask(self, chain: List[int]) -> Optional[np.ndarray]:
+        hint = getattr(self, "width_recommend_hint", None)
+        if not isinstance(hint, dict):
+            return None
+        if len(self.width_ctrl_indices) > 0:
+            return None
+        if len(chain) < 2:
+            return None
+
+        rec_w1 = hint.get("recommended_w1_idx")
+        rec_w2 = hint.get("recommended_w2_idx")
+        w1 = int(chain[0])
+        w2 = int(chain[-1])
+        if rec_w1 is None or rec_w2 is None:
+            return None
+        if not ({int(rec_w1), int(rec_w2)} == {w1, w2}):
+            return None
+
+        origin = np.asarray(hint.get("origin"), dtype=np.float64)
+        tangent = self._unit_vector(np.asarray(hint.get("tangent"), dtype=np.float64))
+        if origin.shape != (3,) or tangent is None:
+            return None
+
+        pts = self.ds.points
+        rel = pts - origin[None, :]
+        axial = np.abs(rel @ tangent)
+        slab_half = max(float(getattr(self.params, "slab_half", 0.0)), 1e-6)
+        base_radius = max(float(getattr(self.params, "radius", 0.0)), slab_half)
+        min_keep = max(int(self.params.k) * 3, 24)
+
+        for expand in [1.0, 1.5, 2.0, 3.0]:
+            slab = slab_half * expand
+            radial = base_radius * (2.0 * expand)
+            mask = axial <= slab
+            perp = rel - np.outer(rel @ tangent, tangent)
+            perp_dist = np.linalg.norm(perp, axis=1)
+            mask &= perp_dist <= radial
+            for idx in chain:
+                mask[int(idx)] = True
+            if int(np.count_nonzero(mask)) >= min_keep:
+                return mask
+        return None
+
+    def _build_width_shortest_path(
+        self,
+        chain: List[int],
+        allowed_mask: Optional[np.ndarray] = None,
+    ) -> Tuple[Optional[np.ndarray], Optional[List[int]]]:
+        pts = self.ds.points
+        if len(chain) < 2:
+            return None, None
+
+        if allowed_mask is None:
+            node_ids = np.arange(len(pts), dtype=np.int64)
+            sub_pts = pts
+            local_chain = [int(i) for i in chain]
+        else:
+            mask = np.asarray(allowed_mask, dtype=bool).copy()
+            if len(mask) != len(pts):
+                return None, None
+            for idx in chain:
+                mask[int(idx)] = True
+            node_ids = np.where(mask)[0].astype(np.int64)
+            if len(node_ids) < 2:
+                return None, None
+            local_map = {int(g): i for i, g in enumerate(node_ids.tolist())}
+            local_chain = []
+            for idx in chain:
+                gi = int(idx)
+                if gi not in local_map:
+                    return None, None
+                local_chain.append(int(local_map[gi]))
+            sub_pts = pts[node_ids]
+
+        G = _build_knn_graph(sub_pts, k=self.params.k)
+        path_local: List[int] = []
+        for a, b in zip(local_chain[:-1], local_chain[1:]):
+            pidx = _shortest_path_indices(G, int(a), int(b))
+            if pidx is None or len(pidx) == 0:
+                return None, None
+            if path_local:
+                pidx = pidx[1:]
+            path_local.extend([int(i) for i in pidx])
+
+        if len(path_local) < 2:
+            return None, None
+        path_idx = node_ids[np.asarray(path_local, dtype=np.int64)].astype(np.int64)
+        return pts[path_idx], path_idx.tolist()
 
     # ---------- compute ----------
 
@@ -239,30 +351,12 @@ class LeafMixin:
         self.width_path_length = None
 
         if self.width_w1_idx is not None and self.width_w2_idx is not None:
-            pts = self.ds.points
-            G = _build_knn_graph(pts, k=self.params.k)
-            chain: List[int] = [int(self.width_w1_idx)]
-            if len(self.width_ctrl_indices) > 0:
-                chain += [int(i) for i in self.get_sorted_width_ctrl_indices()]
-            chain.append(int(self.width_w2_idx))
-
-            path_all: List[int] = []
-            ok = True
-            for a, b in zip(chain[:-1], chain[1:]):
-                pidx = _shortest_path_indices(G, int(a), int(b))
-                if pidx is None or len(pidx) == 0:
-                    ok = False
-                    break
-                if path_all:
-                    pidx = pidx[1:]
-                path_all.extend([int(i) for i in pidx])
-
-            if ok and len(path_all) >= 2:
-                path_idx = np.asarray(path_all, dtype=np.int64)
-                path_pts = pts[path_idx]
-                self.width_path_points = path_pts
+            path_pts, path_idx = self.build_width_polyline()
+            if path_pts is not None and path_idx is not None and len(path_idx) >= 2:
+                path_idx_arr = np.asarray(path_idx, dtype=np.int64)
+                self.width_path_points = np.asarray(path_pts, dtype=np.float64)
                 self.width_path_length = _polyline_length(path_pts)
-                self.width_path_indices = path_idx
+                self.width_path_indices = path_idx_arr
             else:
                 self.width_path_indices = None
         else:
@@ -289,20 +383,28 @@ class LeafMixin:
         self._require_instance()
         self._require_width_endpoints()
 
-        pts = self.ds.points
         chain: List[int] = [int(self.width_w1_idx)]
         if len(self.width_ctrl_indices) > 0:
             chain += [int(i) for i in self.get_sorted_width_ctrl_indices()]
         chain.append(int(self.width_w2_idx))
 
-        path_all: List[int] = []
+        clean_chain: List[int] = []
         for idx in chain:
-            if not path_all or path_all[-1] != int(idx):
-                path_all.append(int(idx))
-        if len(path_all) < 2:
+            i = int(idx)
+            if not clean_chain or clean_chain[-1] != i:
+                clean_chain.append(i)
+        if len(clean_chain) < 2:
             return None, None
-        path_idx = np.asarray(path_all, dtype=np.int64)
-        return pts[path_idx], path_all
+
+        # If width endpoints come from recommendation, constrain search to the local
+        # cross-section around that centerline step, so width stays near perpendicular.
+        local_mask = self._build_width_constraint_mask(clean_chain)
+        if local_mask is not None:
+            local_pts, local_idx = self._build_width_shortest_path(clean_chain, allowed_mask=local_mask)
+            if local_pts is not None and local_idx is not None:
+                return local_pts, local_idx
+
+        return self._build_width_shortest_path(clean_chain, allowed_mask=None)
 
 
     def _get_length_polyline_for_area(self) -> np.ndarray:
