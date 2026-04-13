@@ -64,9 +64,11 @@ class AnnotationMixin:
                 return
 
             # 为了“展示出叶宽的位置”，这里直接计算一次当前 width_path（不 commit）
-            self.session.compute()
-            path_idx = getattr(self.session, "width_path_indices", None)
-            if path_idx is not None and len(path_idx) > 0:
+            path_pts, path_idx = self.session.build_width_shortest_path()
+            if path_pts is not None and path_idx is not None and len(path_idx) >= 2:
+                self.session.width_path_points = np.asarray(path_pts, dtype=np.float64)
+                self.session.width_path_indices = np.asarray(path_idx, dtype=np.int64)
+                self.session.width_path_length = float(np.linalg.norm(path_pts[1:] - path_pts[:-1], axis=1).sum())
                 w1 = getattr(self.session, "width_w1_idx", None)
                 w2 = getattr(self.session, "width_w2_idx", None)
                 ctrl_idx = []
@@ -82,6 +84,13 @@ class AnnotationMixin:
                 self.session.width_ctrl_indices = ctrl_idx
                 self.session.width_ctrl_ids = [10 * (i + 1) for i in range(len(ctrl_idx))]
                 self.session._next_width_ctrl_id = 10 * (len(ctrl_idx) + 1) if len(ctrl_idx) > 0 else 10
+            else:
+                self.session.width_path_points = None
+                self.session.width_path_indices = None
+                self.session.width_path_length = None
+                self.session.width_ctrl_indices = []
+                self.session.width_ctrl_ids = []
+                self.session._next_width_ctrl_id = 10
 
             self._update_markers_saved()
             self._update_labels_saved()

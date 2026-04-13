@@ -27,7 +27,6 @@ class InstanceMixin:
 
         self.width_w1_idx = None
         self.width_w2_idx = None
-        self.width_recommend_hint = None
         self._width_recommended_once = False
 
         self.centerline_result = None
@@ -63,7 +62,6 @@ class InstanceMixin:
 
         self.width_w1_idx = None
         self.width_w2_idx = None
-        self.width_recommend_hint = None
         self._width_recommended_once = False
 
         self.centerline_result = None

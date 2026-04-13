@@ -15,7 +15,6 @@ class AnnotationParams:
     slab_half: float = 0.01
     radius: float = 0.01
     min_slice_pts: int = 60
-    width_perp_lambda: float = 0.2
 
     # Leaf angle parameters (default: 1/5)
     leaf_inclination_ratio: float = 0.2

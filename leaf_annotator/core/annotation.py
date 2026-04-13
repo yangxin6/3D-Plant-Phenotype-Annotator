@@ -65,7 +65,6 @@ class LeafAnnotationSession(BaseMixin, IoMixin, SemanticMixin, StemMixin, ObbMix
         # width endpoints (ds index)
         self.width_w1_idx: Optional[int] = None
         self.width_w2_idx: Optional[int] = None
-        self.width_recommend_hint: Optional[Dict[str, Any]] = None
 
         # 推荐端点只自动给一次；用户删除后不再自动冒出来
         self._width_recommended_once: bool = False
